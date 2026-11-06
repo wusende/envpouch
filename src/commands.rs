@@ -649,19 +649,13 @@ pub fn run(
         // inside pre_exec; ignore failures (rare, e.g. hard resource limit).
         unsafe {
             cmd.pre_exec(|| {
-                // BSD/macOS take a struct pointer; Linux takes the value
-                #[cfg(target_os = "macos")]
-                {
-                    let lim = libc::rlimit {
-                        rlim_cur: 0,
-                        rlim_max: 0,
-                    };
-                    libc::setrlimit(libc::RLIMIT_CORE, &lim);
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    libc::setrlimit(libc::RLIMIT_CORE, 0);
-                }
+                // setrlimit takes a struct pointer on every unix (libc maps it
+                // to the same signature on Linux and BSD/macOS).
+                let lim = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                libc::setrlimit(libc::RLIMIT_CORE, &lim);
                 Ok(())
             });
         }
@@ -901,7 +895,8 @@ fn read_password_stdin() -> Result<Zeroizing<String>> {
             Err(e) => return Err(e).context("failed to read password from stdin"),
         }
     }
-    if buf.len() > MAX_PASSWORD_BYTES && !(buf.len() == MAX_PASSWORD_BYTES + 1 && buf.last() == Some(&b'\n'))
+    if buf.len() > MAX_PASSWORD_BYTES
+        && !(buf.len() == MAX_PASSWORD_BYTES + 1 && buf.last() == Some(&b'\n'))
     {
         bail!("password on stdin exceeds {MAX_PASSWORD_BYTES} bytes");
     }
@@ -918,7 +913,9 @@ pub fn list() -> Result<()> {
     let profiles = profile::list()?;
     let mut out = String::new();
     if profiles.is_empty() {
-        out.push_str("No profiles yet. Create one with: envpouch import <name> --from <env-file>\n");
+        out.push_str(
+            "No profiles yet. Create one with: envpouch import <name> --from <env-file>\n",
+        );
         return write_stdout(out.as_bytes());
     }
     let _ = writeln!(out, "{:<20} {:>8}  Updated", "Name", "Vars");

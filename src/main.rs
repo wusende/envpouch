@@ -201,10 +201,8 @@ fn dispatch(password_stdin: bool, command: Commands) -> i32 {
             only,
             except,
             merge,
-        } => {
-            commands::import_command(&name, from, from_env, only, except, merge, password_stdin)
-                .map(|_| 0)
-        }
+        } => commands::import_command(&name, from, from_env, only, except, merge, password_stdin)
+            .map(|_| 0),
         Commands::Show { name, reveal } => commands::show(&name, reveal, password_stdin).map(|_| 0),
         Commands::Export { name, output } => {
             commands::export(&name, output, password_stdin).map(|_| 0)

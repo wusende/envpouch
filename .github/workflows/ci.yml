@@ -19,9 +19,35 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install dbus headers (keyring -> libdbus-1)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - name: Format check
         run: cargo fmt --check
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets -- -D warnings
       - name: Tests
         run: cargo test --release
+
+  # The crate package is what `cargo install envpouch` compiles, and the npm
+  # package is built from the same Cargo.toml version — check both without
+  # needing any platform binary.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo package
+        run: cargo package --locked --no-verify
+      - name: npm packaging scripts
+        run: |
+          bash -n scripts/npm-pack.sh
+          bash -n scripts/npm-publish.sh
+          node --check npm/envpouch/bin/envpouch.js
+          node -e "JSON.parse(require('node:fs').readFileSync('npm/envpouch/package.json', 'utf8'))"
+      # The tracked launcher manifest is committed, so a release commit that bumps
+      # Cargo.toml but not it would publish a correct version while leaving the
+      # repo lying about it. npm-pack.sh writes the file back only in the runner.
+      - name: npm manifest matches Cargo.toml
+        run: bash scripts/npm-pack.sh --check-version

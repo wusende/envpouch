@@ -1,0 +1,37 @@
+{
+  "name": "envpouch",
+  "version": "0.1.0",
+  "description": "Encrypted environment variable profile manager: import, export and run with password-protected profiles.",
+  "license": "MIT",
+  "author": "wusende",
+  "homepage": "https://github.com/wusende/envpouch#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wusende/envpouch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wusende/envpouch/issues"
+  },
+  "keywords": [
+    "env",
+    "dotenv",
+    "secrets",
+    "encryption",
+    "cli",
+    "environment-variables",
+    "profile"
+  ],
+  "bin": {
+    "envpouch": "bin/envpouch.js"
+  },
+  "files": [
+    "bin/envpouch.js",
+    "vendor/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

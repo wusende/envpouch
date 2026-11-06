@@ -1,6 +1,8 @@
 # envpouch
 
 [![CI](https://github.com/wusende/envpouch/actions/workflows/ci.yml/badge.svg)](https://github.com/wusende/envpouch/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/envpouch.svg)](https://crates.io/crates/envpouch)
+[![npm](https://img.shields.io/npm/v/envpouch.svg)](https://www.npmjs.com/package/envpouch)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B%20(edition%202024)-orange)](https://github.com/wusende/envpouch)
 
@@ -22,7 +24,24 @@ for scripts/CI (see [Scripts / CI](#scripts--ci)).
 
 ## Install / build
 
-Requires Rust 1.85+ (edition 2024).
+Any of these:
+
+```sh
+npm install -g envpouch     # prebuilt binary, no toolchain
+cargo install envpouch      # from crates.io, needs a Rust toolchain
+```
+
+Prebuilt binaries are also on
+[Releases](https://github.com/wusende/envpouch/releases) — Linux (amd64,
+glibc 2.35+; arm64, glibc 2.39+), macOS (universal2), Windows (amd64) — put
+one on your `PATH`. The npm package is a thin launcher around that same
+binary; musl/Alpine and Windows arm64 are not covered, use `cargo install`
+there.
+
+`cargo install` lands in `~/.cargo/bin`, which sudo can't see. So if you later
+run `sudo envpouch run prod -- ...`, use `sudo ~/.cargo/bin/envpouch ...`.
+
+From a checkout (requires Rust 1.85+, edition 2024):
 
 ```sh
 cargo install --path .    # installs to ~/.cargo/bin (usually already on PATH)
@@ -235,9 +254,10 @@ envpouch complete --shell zsh   > "${fpath[1]}/_envpouch"   # zsh
 envpouch complete --shell fish  > ~/.config/fish/completions/envpouch.fish
 ```
 
-**Prebuilt binaries** — tagged releases (`v*`) publish static musl binaries
+**Prebuilt binaries** — tagged releases (`v*`) publish glibc binaries
 (x86_64/aarch64 Linux), a universal2 macOS build, and an x86_64 Windows
 build (MSVC, `.zip`) with SHA-256 checksums on the GitHub Releases page;
+the same binaries are bundled in the npm package;
 `scripts/fuzz_cli.sh` and `cargo test` gate every CI run.
 
 **Backup / restore** — profile files are self-contained encrypted blobs;

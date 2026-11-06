@@ -2,7 +2,9 @@
 name = "envpouch"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Encrypted environment variable profile manager (import/export/run with password)"
+exclude = [".github", "scripts", "npm"]
 license = "MIT"
 repository = "https://github.com/wusende/envpouch"
 homepage = "https://github.com/wusende/envpouch"

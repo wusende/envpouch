@@ -1,3 +1,6 @@
 /target
 .zcode/
 .DS_Store
+
+# Staged npm packages (scripts/npm-pack.sh); regenerated, never committed
+npm/dist/
