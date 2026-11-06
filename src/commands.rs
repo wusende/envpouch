@@ -14,7 +14,6 @@ use zeroize::Zeroizing;
 use crate::crypto::{self, FileMeta};
 use crate::envfile::{self, EnvVars};
 use crate::exclude;
-use crate::keycache;
 use crate::mask;
 use crate::profile;
 
@@ -24,28 +23,15 @@ fn prompt_password(prompt: &str) -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(pw))
 }
 
-/// Debug impl never prints the password lines, to avoid leaking secrets
-/// to logs and test-failure output.
-impl std::fmt::Debug for PasswordInput {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PasswordInput")
-            .field("stdin", &self.stdin)
-            .field("file", &self.file)
-            .finish_non_exhaustive()
-    }
-}
-
 /// Password input configured by the global flags (spec §4.3):
 /// `--password-stdin` (one stdin line per prompt), `--password-file`
 /// (one file line per prompt, file must be mode 0600 on unix), or the
-/// default keychain → interactive prompt. Explicit flags take precedence
-/// over the keychain, so a service with a password file never probes
-/// D-Bus on its start path.
+/// interactive prompt. Explicit flags never touch the tty.
 pub(crate) struct PasswordInput {
     stdin: bool,
     file: Option<PathBuf>,
     /// Password-file lines, loaded on first use: commands that decrypt
-    /// nothing (`list`, `rm`, `lock`) never touch the file.
+    /// nothing (`list`, `rm`) never touch the file.
     lines: Option<Zeroizing<Vec<String>>>,
     cursor: usize,
 }
@@ -54,33 +40,19 @@ impl PasswordInput {
     /// Build from the parsed global flags. Mutually exclusive at the CLI
     /// level (clap `conflicts_with`); re-checked here for defense in depth.
     pub(crate) fn from_flags(stdin: bool, file: Option<PathBuf>) -> Result<Self> {
-        match (stdin, file) {
-            (true, Some(_)) => {
-                bail!("--password-stdin and --password-file are mutually exclusive")
-            }
-            (true, None) => Ok(Self {
-                stdin: true,
-                file: None,
-                lines: None,
-                cursor: 0,
-            }),
-            (false, Some(file)) => Ok(Self {
-                stdin: false,
-                file: Some(file),
-                lines: None,
-                cursor: 0,
-            }),
-            (false, None) => Ok(Self {
-                stdin: false,
-                file: None,
-                lines: None,
-                cursor: 0,
-            }),
+        if stdin && file.is_some() {
+            bail!("--password-stdin and --password-file are mutually exclusive");
         }
+        Ok(Self {
+            stdin,
+            file,
+            lines: None,
+            cursor: 0,
+        })
     }
 
     /// True when the password comes from a flag (stdin or file) instead of
-    /// the keychain/prompt path.
+    /// the interactive prompt.
     fn is_explicit(&self) -> bool {
         self.stdin || self.file.is_some()
     }
@@ -166,33 +138,21 @@ fn read_password_file(path: &Path) -> Result<Zeroizing<Vec<String>>> {
 }
 
 /// Unified password acquisition (spec §4.3): the explicit flag source
-/// (--password-stdin / --password-file) first, then the OS keychain cache,
-/// then the interactive prompt. Every decrypting command goes through this
-/// so `unlock` benefits all of them.
-fn obtain_password(
-    name: &str,
-    input: &mut PasswordInput,
-    prompt: &str,
-) -> Result<Zeroizing<String>> {
+/// (--password-stdin / --password-file) first, then the interactive prompt.
+/// Every decrypting command goes through this.
+fn obtain_password(input: &mut PasswordInput, prompt: &str) -> Result<Zeroizing<String>> {
     if input.is_explicit() {
         return input.next_password();
-    }
-    if let Some(pw) = keycache::lookup(name) {
-        return Ok(pw);
     }
     prompt_password(prompt)
 }
 
-/// Open an existing profile: read it, acquire the password (flag source →
-/// keychain → prompt), decrypt, parse. The derived key is returned so callers
-/// that re-save can skip a second KDF pass. Shared by every decrypting command.
+/// Open an existing profile: read it, acquire the password (flag source or
+/// prompt), decrypt, parse. The derived key is returned so callers that
+/// re-save can skip a second KDF pass. Shared by every decrypting command.
 fn open_profile(name: &str, input: &mut PasswordInput) -> Result<(EnvVars, crypto::DerivedKey)> {
     let blob = profile::read(name)?;
-    let password = obtain_password(
-        name,
-        input,
-        &format!("Enter password for profile '{name}': "),
-    )?;
+    let password = obtain_password(input, &format!("Enter password for profile '{name}': "))?;
     let (decrypted, derived) = crypto::decrypt_derived(&blob, password.as_str())?;
     let vars = EnvVars::from_json(&decrypted.plaintext)?;
     Ok((vars, derived))
@@ -855,34 +815,29 @@ pub fn diff(name_a: &str, name_b: &str, input: &mut PasswordInput) -> Result<()>
     write_stdout(out.as_bytes())
 }
 
-/// `envp run <name> [--clean] [--dry-run] [--detach] [--allow-core-dumps]
-/// <cmd> [args...]` (`--password-stdin` / `--password-file` are global flags,
-/// usable with this and every other password-requiring command)
+/// `envp run <name> [--clean] [--dry-run] [--allow-core-dumps] <cmd> [args...]`
+/// (`--password-stdin` / `--password-file` are global flags, usable with this
+/// and every other password-requiring command)
 ///
-/// Process model: on unix the foreground path decrypts, prepares the
-/// environment, then `exec`s the target in place. The application keeps
-/// envp's PID and process group, so Ctrl-C/Ctrl-Z, supervisor signals and
-/// the exit status go straight to it — there is no wrapper process between
-/// systemd/supervisord and the app. `--detach` is the exception: it spawns
-/// the command into a new session and envp exits immediately. Windows has
-/// no `exec`, so it spawns and waits there.
+/// Process model: on unix, decrypt, prepare the environment, then `exec` the
+/// target in place. The application keeps envp's PID and process group, so
+/// Ctrl-C/Ctrl-Z, supervisor signals and the exit status go straight to it —
+/// there is no wrapper process between systemd/supervisord and the app.
+/// Windows has no `exec`, so it spawns and waits there.
 ///
-/// Returns the child exit code on the paths that return (dry-run, detach,
-/// windows, errors): 1:1 for the child, 127 not found, 126 no execute
-/// permission, 1 for envp errors. A successful unix foreground `exec` never
-/// returns.
+/// Returns the exit code only on the paths that return (dry-run, windows,
+/// errors): 1:1 for the child, 127 not found, 126 no execute permission, 1
+/// for envp errors. A successful unix `exec` never returns.
 ///
 /// Secrets hygiene: `exec` replaces envp's image, so decrypted vars, the
 /// derived key and password buffers are reclaimed by the kernel instead of
 /// living for the service lifetime. Core dumps stay disabled by default;
 /// pass `allow_core_dumps` to keep the supervisor's limits (systemd
 /// `LimitCORE=`, `ulimit -c`).
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     name: &str,
     clean: bool,
     dry_run: bool,
-    detach: bool,
     allow_core_dumps: bool,
     input: &mut PasswordInput,
     command: &[String],
@@ -912,8 +867,7 @@ pub fn run(
         cmd.env(k, v);
     }
     // The command env was copied into `cmd`; release the plaintext maps now.
-    // The exec path replaces the image anyway, but keeping this also covers
-    // the error and detach paths.
+    // The exec path replaces the image anyway, but this also covers errors.
     drop(env_map);
     drop(vars);
 
@@ -923,39 +877,14 @@ pub fn run(
 
         // Best-effort: disable core dumps for the target to shrink the leak
         // surface (spec §1, §4.6), unless the operator opted out to keep the
-        // supervisor's core-dump policy. The limit survives exec (foreground)
-        // and is inherited by the spawned child (--detach).
+        // supervisor's core-dump policy. The limit survives exec.
         if !allow_core_dumps {
             disable_core_dumps();
         }
 
-        if detach {
-            // nohup-style detachment: new session, envp exits immediately.
-            // Do not also call process_group(0): setsid creates a fresh
-            // session/group, and a process group leader cannot call setsid.
-            unsafe {
-                cmd.pre_exec(|| {
-                    if libc::setsid() == -1 {
-                        libc::setpgid(0, 0);
-                    }
-                    Ok(())
-                });
-            }
-            let child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => return start_error(e, command),
-            };
-            let pid = child.id();
-            drop(child);
-            return out_line(format!(
-                "Detached: pid {pid} (envp exits; stdout/stderr still go to this terminal)"
-            ))
-            .map(|()| 0);
-        }
-
-        // Foreground: become the target. exec() only returns on failure;
-        // PID, process group, tty and signal dispositions are preserved, so
-        // supervisors and job control see the application itself.
+        // Become the target. exec() only returns on failure; PID, process
+        // group, tty and signal dispositions are preserved, so supervisors
+        // and job control see the application itself.
         //
         // Audit gets a line before the image is replaced; envp can no longer
         // observe the application's exit status afterwards.
@@ -976,20 +905,12 @@ pub fn run(
         // The child has its own copy of the environment now; dropping `cmd`
         // releases the parent-side copy std keeps inside the Command.
         drop(cmd);
-        if detach {
-            let pid = child.id();
-            drop(child);
-            return out_line(format!(
-                "Detached: pid {pid} (envp exits; stdout/stderr still go to this terminal)"
-            ))
-            .map(|()| 0);
-        }
         let status = child.wait()?;
         Ok(exit_code_of(&status))
     }
 }
 
-/// Best-effort `RLIMIT_CORE = 0` for the program envp is about to exec/spawn.
+/// Best-effort `RLIMIT_CORE = 0` for the program envp is about to exec.
 /// Failure is ignored (e.g. a hard limit the caller cannot lower further).
 #[cfg(unix)]
 fn disable_core_dumps() {
@@ -1268,67 +1189,22 @@ pub fn cp(src: &str, dst: &str) -> Result<()> {
     out_line(format!("Profile '{src}' copied to '{dst}'"))
 }
 
-/// `envp rename <src> <dst>` (alias `mv`): rename in place. The cached
-/// keychain entry was keyed by the old name and is dropped.
+/// `envp rename <src> <dst>` (alias `mv`): rename in place.
 pub fn rename(src: &str, dst: &str) -> Result<()> {
     check_transfer_args(src, dst)?;
     profile::rename(src, dst)?;
-    let _ = keycache::clear(src);
     out_line(format!("Profile '{src}' renamed to '{dst}'"))
 }
 
 /// `envp passwd <name>`: decrypt with the current password, re-encrypt with
-/// a new one (v1 format unchanged; fresh salt/nonce per write). A cached
-/// keychain entry for the old password becomes stale — remove it.
+/// a new one (v1 format unchanged; fresh salt/nonce per write).
 pub fn passwd(name: &str, input: &mut PasswordInput) -> Result<()> {
     let (vars, _) = open_profile(name, input)?;
 
     let new = new_password(input)?;
     let derived = crypto::DerivedKey::fresh(new.as_str())?;
     save_profile(name, &vars, &derived)?;
-    let _ = keycache::clear(name);
     out_line(format!("Password changed for profile '{name}'"))
-}
-
-/// `envp unlock <name> [--ttl <seconds>]` (spec §4.3): verify the password,
-/// then cache it in the OS keychain. On keychain failure, degrade to a
-/// warning instead of hard-failing (SSH sessions without GUI access).
-pub fn unlock(name: &str, ttl: u64, input: &mut PasswordInput) -> Result<()> {
-    profile::validate_name(name)?;
-    // Usage errors fail fast (§0.5) — they are not keychain unavailability
-    // and must not be swallowed by the degrade path below.
-    if ttl == 0 || ttl > keycache::MAX_TTL_SECS {
-        bail!(
-            "--ttl must be between 1 and {} seconds (30 days)",
-            keycache::MAX_TTL_SECS
-        );
-    }
-    let blob = profile::read(name)?;
-    // unlock verifies the real password: never the keychain cache itself
-    let password = if input.is_explicit() {
-        input.next_password()?
-    } else {
-        prompt_password(&format!("Enter password for profile '{name}': "))?
-    };
-    crypto::decrypt(&blob, password.as_str())?;
-    match keycache::store(name, password.as_str(), ttl) {
-        Ok(()) => out_line(format!(
-            "Password cached for profile '{name}' (expires in {ttl}s)"
-        )),
-        Err(e) => {
-            eprintln!(
-                "warning: could not access the OS keychain ({e}); type the password manually instead"
-            );
-            Ok(())
-        }
-    }
-}
-
-/// `envp lock <name>`: remove the cached keychain entry.
-pub fn lock(name: &str) -> Result<()> {
-    profile::validate_name(name)?;
-    let _ = keycache::clear(name);
-    out_line(format!("Cached password for profile '{name}' removed"))
 }
 
 fn format_unix(ts: u64) -> String {
@@ -1530,7 +1406,8 @@ mod tests {
     #[test]
     fn password_flags_are_mutually_exclusive() {
         let err = PasswordInput::from_flags(true, Some(PathBuf::from("/x")))
-            .unwrap_err()
+            .err()
+            .expect("both flags must be rejected")
             .to_string();
         assert!(err.contains("mutually exclusive"), "{err}");
         // stdin mode still works and reserves stdin

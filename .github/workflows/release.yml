@@ -14,10 +14,9 @@ env:
 # Asset names carry the Rust target instead of the tag, so scripts/npm-pack.sh
 # can build the same URL for every release and verify a .sha256 sidecar.
 #
-# The Linux builds are glibc, not static musl: `keyring`'s sync Secret Service
-# backend links libdbus-1 (a C library), which has no musl build here. glibc
-# floor is whatever the runner ships — 22.04 for x86_64 (2.35), which covers
-# Debian 12 / Ubuntu 22.04+, and 24.04 for arm64 (2.39, no older arm64 runner).
+# The Linux builds are glibc (not static musl); the glibc floor is whatever
+# the runner ships — 22.04 for x86_64 (2.35), which covers Debian 12 /
+# Ubuntu 22.04+, and 24.04 for arm64 (2.39, no older arm64 runner).
 jobs:
   build-linux-x86_64:
     name: build x86_64-unknown-linux-gnu
@@ -28,8 +27,6 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
-      - name: Install dbus headers
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - name: Build
         run: cargo build --release --locked --target x86_64-unknown-linux-gnu
       - name: Smoke test
@@ -56,8 +53,6 @@ jobs:
         with:
           targets: aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
-      - name: Install dbus headers
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - name: Build
         run: cargo build --release --locked --target aarch64-unknown-linux-gnu
       - name: Smoke test

@@ -66,8 +66,8 @@ trap 'rm -rf "$tmp"' EXIT
 rm -rf "$dist"
 mkdir -p "$dist/envpouch/vendor"
 
-# The Linux builds are glibc (keyring's Secret Service backend links libdbus)
-# and macOS ships one universal2 binary for both architectures.
+# The Linux builds are glibc and macOS ships one universal2 binary for both
+# architectures.
 # vendor dir | release asset | binary name | rust targets packed inside
 platforms=(
   "linux-x64|envpouch-x86_64-unknown-linux-gnu.tar.gz|envp|x86_64-unknown-linux-gnu"

@@ -37,20 +37,19 @@ envp show prod                            # variables, values masked
 envp run prod ./start-server.sh           # decrypt and run with them set
 ```
 
-Every command that decrypts gets the password one of four ways: the
-interactive prompt (default), the OS keychain after `envp unlock prod`
-caches it for 15 minutes (`envp lock prod` drops it early),
-`--password-stdin` reading it from stdin for scripts, or
-`--password-file <file>` reading one password per line from a 0600 file
-for services (see [systemd / supervisord](#systemd--supervisord)).
+Every command that decrypts gets the password one of three ways: the
+interactive prompt (default), `--password-stdin` reading it from stdin
+for scripts, or `--password-file <file>` reading one password per line
+from a 0600 file for services (see
+[systemd / supervisord](#systemd--supervisord)).
 
 **There is no password recovery.** A lost password means the profile is
 gone. Keep passwords in a password manager.
 
 ## Commands
 
-All commands except `list`, `rm`, `lock` and `complete` need the password.
-`--password-stdin` and `--password-file` are global flags and work with
+All commands except `list`, `rm`, `cp`, `rename` and `complete` need the
+password. `--password-stdin` and `--password-file` are global flags and work with
 every one of them, before or after the subcommand (the two are mutually
 exclusive). With a file, one line is consumed per password prompt, in
 prompt order — same contract as stdin.
@@ -67,8 +66,7 @@ prompt order — same contract as stdin.
 | `diff <a> <b>` | Compare two profiles, masked |
 | `run <name> <cmd> [args...]` | Run a command with the variables injected |
 | `fpm-snippet <name>` | Print php-fpm pool `env[...]` lines |
-| `list` / `rm` / `passwd` | List, delete, change password |
-| `unlock` / `lock` | Cache the password in the OS keychain / drop it |
+| `list` / `rm` / `passwd` / `cp` / `rename` | List, delete, change password, copy, rename |
 | `complete --shell <shell>` | Print shell completions |
 
 A bare `KEY` in `set` is the safe way to store secrets: `KEY=VALUE` on the
@@ -80,9 +78,12 @@ command line is visible to same-user processes and lands in shell history.
 envp run prod ./deploy.sh
 envp run prod --clean python app.py      # only a minimal base env plus profile vars
 envp run prod --dry-run ./deploy.sh      # print what would run, never values
-envp run prod --detach ./server.sh       # detach; envp exits immediately
 envp run prod --allow-core-dumps ./srv   # keep core dumps (LimitCORE= applies)
 ```
+
+For an ad-hoc background process, `nohup envp run prod ./server &` works:
+envp execs the app, so no wrapper remains. Use systemd/supervisord when
+you need restarts and supervision.
 
 - By default the command gets your full environment with the profile
   variables on top. `--clean` gives it only `PATH`, `HOME`, `USER` and a
@@ -96,11 +97,9 @@ envp run prod --allow-core-dumps ./srv   # keep core dumps (LimitCORE= applies)
 - On unix, envp **execs the command in place** after decrypting: the
   command keeps envp's PID and process group, so Ctrl-C/Ctrl-Z,
   supervisor signals and the exit status go straight to it. There is no
-  wrapper process in the service tree. `--detach` is the exception (new
-  session; envp exits).
-- Because of that exec (or exit, for `--detach`), decrypted variables,
-  the derived key and password buffers do not stay in memory for the
-  service lifetime.
+  wrapper process in the service tree.
+- Because of that exec, decrypted variables, the derived key and
+  password buffers do not stay in memory for the service lifetime.
 - Core dumps are disabled for the command by default (leak-surface
   reduction); `--allow-core-dumps` keeps the supervisor's limits instead
   (systemd `LimitCORE=`, `ulimit -c`).
@@ -126,9 +125,8 @@ files (chmod 600) so the file cannot silently become the weak link.
 `envp run` is a password-bearing launcher: it decrypts, then (on unix)
 execs the application, so it does not stay in the process tree. Every
 start and every automatic restart still needs the password, unattended.
-Use a `--password-file` for this — the keychain cache from `unlock`
-depends on a user session (D-Bus Secret Service on Linux) that system
-services do not have, and it expires.
+Use `--password-file` (or a systemd credential) for this — there is no
+interactive tty in a system service.
 
 ### systemd
 
@@ -156,8 +154,7 @@ password files.
   Create the profile itself as `myapp` (or chown the profile files) under
   `ENVPOUCH_HOME`, otherwise the 0600 files are unreadable to the service.
 - `Type=notify` works normally: the application is MainPID because envp
-  execs it. Do not use `--detach` under any supervisor — it deliberately
-  escapes supervision.
+  execs it.
 - Do not use `--clean` under systemd: it drops `NOTIFY_SOCKET`,
   `WATCHDOG_USEC`, `JOURNAL_STREAM` and other systemd-provided variables.
 - Every start pays one Argon2id derivation (tens to hundreds of
@@ -183,7 +180,6 @@ autostart and exit-status handling behave exactly as for a normal
 program.
 
 - Use `--password-file` (0600) for unattended starts.
-- Do not use `--detach`: it deliberately leaves supervision.
 - Do not use `--clean` if the app relies on supervisor-provided
   environment variables.
 - The application must stay in the foreground (no self-daemonizing);
@@ -198,9 +194,9 @@ this:
   `getenv()` in PHP returns nothing. Append
   `envp fpm-snippet prod >> www.conf` to emit one `env[KEY] = value` line
   per variable, or set `clear_env = no` in the pool.
-- `daemonize=yes` (the default) forks the master into the background, so
-  envp returns immediately. That is success, not failure. Under systemd,
-  use `daemonize = no`.
+- `daemonize=yes` (the default) forks the master into the background and
+  the original process exits, so the supervisor sees the service stop.
+  Under systemd/supervisord, use `daemonize = no`.
 
 ## Files
 

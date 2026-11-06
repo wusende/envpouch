@@ -9,13 +9,12 @@
 //! - `envp fpm-snippet <name>`                                     php-fpm pool env[...] lines
 //! - `envp diff <a> <b>`                                           compare two profiles (masked)
 //! - `envp run <name> [options] <command> [args...]`                exec with the variables injected (unix)
-//! - `envp list / rm / cp / rename / passwd / unlock / lock`        profile management
+//! - `envp list / rm / cp / rename / passwd`                        profile management
 //!
 //! Every decrypting command obtains the password via one of the global
 //! `--password-stdin` flag (one stdin line per prompt — scripts/CI),
 //! `--password-file <file>` (one file line per prompt — services; file must
-//! be mode 0600), the OS keychain cache (`unlock`), or the interactive
-//! prompt (spec §4.3).
+//! be mode 0600), or the interactive prompt.
 
 mod audit;
 mod commands;
@@ -24,7 +23,6 @@ mod envfile;
 mod exclude;
 #[cfg(test)]
 mod fuzz_tests;
-mod keycache;
 mod mask;
 mod profile;
 
@@ -149,9 +147,6 @@ enum Commands {
         /// Print what would be executed without running it (never any values)
         #[arg(long)]
         dry_run: bool,
-        /// Start the command detached in a new session; envp exits immediately
-        #[arg(long)]
-        detach: bool,
         /// Keep core dumps enabled for the command (RLIMIT_CORE inherited
         /// from the supervisor, e.g. systemd LimitCORE=); core dumps are
         /// disabled by default
@@ -197,19 +192,6 @@ enum Commands {
         /// Profile name
         name: String,
     },
-    /// Verify and cache the password in the OS keychain (default TTL 900s)
-    Unlock {
-        /// Profile name
-        name: String,
-        /// Cache lifetime in seconds
-        #[arg(long, value_name = "SECONDS", default_value_t = 900)]
-        ttl: u64,
-    },
-    /// Remove the cached keychain entry for a profile
-    Lock {
-        /// Profile name
-        name: String,
-    },
     /// Print shell completion script for the given shell (stdout)
     Complete {
         /// Target shell
@@ -236,8 +218,6 @@ impl Commands {
             Commands::Cp { src, .. } => ("cp", Some(src.clone())),
             Commands::Rename { src, .. } => ("rename", Some(src.clone())),
             Commands::Passwd { name } => ("passwd", Some(name.clone())),
-            Commands::Unlock { name, .. } => ("unlock", Some(name.clone())),
-            Commands::Lock { name } => ("lock", Some(name.clone())),
             Commands::Complete { .. } => ("complete", None),
         }
     }
@@ -291,14 +271,12 @@ fn dispatch(password_stdin: bool, password_file: Option<PathBuf>, command: Comma
             name,
             clean,
             dry_run,
-            detach,
             allow_core_dumps,
             command,
         } => commands::run(
             &name,
             clean,
             dry_run,
-            detach,
             allow_core_dumps,
             &mut input,
             &command,
@@ -308,8 +286,6 @@ fn dispatch(password_stdin: bool, password_file: Option<PathBuf>, command: Comma
         Commands::Cp { src, dst } => commands::cp(&src, &dst).map(|_| 0),
         Commands::Rename { src, dst } => commands::rename(&src, &dst).map(|_| 0),
         Commands::Passwd { name } => commands::passwd(&name, &mut input).map(|_| 0),
-        Commands::Unlock { name, ttl } => commands::unlock(&name, ttl, &mut input).map(|_| 0),
-        Commands::Lock { name } => commands::lock(&name).map(|_| 0),
         Commands::Complete { shell } => {
             let mut buf = Vec::new();
             clap_complete::generate(shell, &mut Cli::command(), "envp", &mut buf);

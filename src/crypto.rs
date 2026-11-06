@@ -169,6 +169,8 @@ pub fn encrypt_derived(plaintext: &[u8], derived: &DerivedKey, meta: FileMeta) -
 }
 
 /// Decrypt profile file bytes. Returns an error on wrong password or tampered content.
+/// Test-only convenience wrapper; production decryption needs the derived key.
+#[cfg(test)]
 pub fn decrypt(blob: &[u8], password: &str) -> Result<Decrypted> {
     Ok(decrypt_derived(blob, password)?.0)
 }

@@ -39,9 +39,9 @@ function bail(reason) {
   process.exit(1);
 }
 
-// The Linux builds are glibc: `keyring` links libdbus-1. A glibc binary
-// started under musl fails with a bare "ENOENT" on exec, which reads like a
-// broken install; name the real cause instead.
+// The Linux builds are glibc. A glibc binary started under musl fails with a
+// bare "ENOENT" on exec, which reads like a broken install; name the real
+// cause instead.
 function isMusl() {
   if (process.platform !== "linux") return false;
   try {

@@ -25,9 +25,9 @@ envpouch/
 └── vendor/win32-x64/envp.exe
 ```
 
-Linux 是 glibc 构建（`keyring` 的 Secret Service 后端链接 libdbus-1，没有可用的
-musl 构建），x86_64 在 ubuntu-22.04 上编（glibc 2.35 下限）、arm64 在
-ubuntu-24.04-arm 上编（2.39）；启动壳对 musl 给出明确提示并回退 `cargo install`。
+Linux 是 glibc 构建（未提供 musl 静态构建），x86_64 在 ubuntu-22.04 上编
+（glibc 2.35 下限）、arm64 在 ubuntu-24.04-arm 上编（2.39）；启动壳对
+musl 给出明确提示并回退 `cargo install`。
 macOS 用 `lipo` 合成的 universal2，一份二进制覆盖
 x64 与 arm64（启动壳把 `darwin-x64` / `darwin-arm64` 都映射到该目录）。
 
