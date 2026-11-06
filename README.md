@@ -1,330 +1,158 @@
 # envpouch
 
-**The project/package is `envpouch`; the command you run is `envp`.**
-Installing gives you `envp` on your `PATH` — there is no `envpouch` command.
-
 [![CI](https://github.com/wusende/envpouch/actions/workflows/ci.yml/badge.svg)](https://github.com/wusende/envpouch/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/envpouch.svg)](https://crates.io/crates/envpouch)
 [![npm](https://img.shields.io/npm/v/envpouch.svg)](https://www.npmjs.com/package/envpouch)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B%20(edition%202024)-orange)](https://github.com/wusende/envpouch)
 
-Encrypted environment-variable profile manager for macOS, Linux, and
-Windows.
-
-Store `.env` files as encrypted, password-protected profiles, then export them,
-edit them, or — the main use case — run any program with those variables
-injected:
+Encrypted environment-variable profiles for macOS, Linux and Windows.
+Turn a `.env` file into a password-protected profile, then run any command
+with those variables injected:
 
 ```sh
 envp import prod --from .env.production
 envp run prod ./start-server.sh
 ```
 
-Every decrypting command obtains the password via the interactive prompt, the
-OS keychain cache (`envp unlock`), or the global `--password-stdin` flag
-for scripts/CI (see [Scripts / CI](#scripts--ci)).
+The package is `envpouch`; the command it installs is `envp`.
 
-## Install / build
-
-Any of these:
+## Install
 
 ```sh
-npm install -g envpouch     # prebuilt binary, no toolchain
-cargo install envpouch      # from crates.io, needs a Rust toolchain
+npm install -g envpouch    # prebuilt binary, no toolchain needed
+cargo install envpouch     # from source, needs Rust 1.85+
 ```
 
-Both installers put the **`envp`** command on your `PATH` (the package name is
-`envpouch`, the binary is `envp`). The npm package's
-postinstall writes a reminder naming the command straight to the terminal.
-`cargo install` has no post-install hook, so it only prints cargo's own lines —
-look for `Installing .../bin/envp` and
+Check with `envp --version`. Prebuilt binaries for Linux (glibc), macOS
+(universal2) and Windows are also on the
+[releases page](https://github.com/wusende/envpouch/releases). On Alpine or
+Windows arm64, use `cargo install`.
 
-```text
-Installed package `envpouch vX.Y.Z` (executable `envp`)
-```
-
-That line is the authoritative "the command is `envp`" for cargo users; the
-same sentence is the first line of this README and of the crate description on
-crates.io.
-
-Prebuilt binaries are also on
-[Releases](https://github.com/wusende/envpouch/releases) — Linux (amd64,
-glibc 2.35+; arm64, glibc 2.39+), macOS (universal2), Windows (amd64) — put
-the `envp` executable (`envp.exe` on Windows) on your `PATH`. The npm package
-is a thin launcher around that same binary; musl/Alpine and Windows arm64 are
-not covered, use `cargo install` there.
-
-`cargo install` lands in `~/.cargo/bin`, which sudo can't see. So if you later
-run `sudo envp run prod ...`, use `sudo ~/.cargo/bin/envp ...`.
-
-From a checkout (requires Rust 1.85+, edition 2024):
+## Basics
 
 ```sh
-cargo install --path .    # installs to ~/.cargo/bin (usually already on PATH)
-# or just build locally:
-cargo build --release     # binary at ./target/release/envp
-cargo test --release
+envp import prod --from .env.production   # new profile, prompts for a password
+envp list                                 # list profiles, no password needed
+envp show prod                            # variables, values masked
+envp run prod ./start-server.sh           # decrypt and run with them set
 ```
 
-After installing, verify with:
+Every command that decrypts gets the password one of three ways: the
+interactive prompt (default), the OS keychain after `envp unlock prod`
+caches it for 15 minutes (`envp lock prod` drops it early), or
+`--password-stdin` reading it from stdin for scripts.
+
+**There is no password recovery.** A lost password means the profile is
+gone. Keep passwords in a password manager.
+
+## Commands
+
+All commands except `list`, `rm`, `lock` and `complete` need the password.
+`--password-stdin` is a global flag and works with every one of them,
+before or after the subcommand.
+
+| Command | What it does |
+|---|---|
+| `import <name> --from <file> [--merge]` | Create a profile from a `.env` file; `--merge` folds into an existing one |
+| `import <name> --from-env [--only A,B \| --except A,B]` | Import from the current environment; a default list (`PATH`, `HOME`, `SSH_*`, …) is always excluded |
+| `show <name> [--reveal]` | Print variables, masked by default |
+| `export <name> [-o <file>]` | Print `.env` text to stdout, or write it to a file |
+| `edit <name>` | Edit in `$EDITOR` |
+| `set <name> KEY=VALUE...` | Add or replace keys; a bare `KEY` prompts for the value with hidden input |
+| `unset <name> KEY...` | Remove keys |
+| `diff <a> <b>` | Compare two profiles, masked |
+| `run <name> <cmd> [args...]` | Run a command with the variables injected |
+| `fpm-snippet <name>` | Print php-fpm pool `env[...]` lines |
+| `list` / `rm` / `passwd` | List, delete, change password |
+| `unlock` / `lock` | Cache the password in the OS keychain / drop it |
+| `complete --shell <shell>` | Print shell completions |
+
+A bare `KEY` in `set` is the safe way to store secrets: `KEY=VALUE` on the
+command line is visible to same-user processes and lands in shell history.
+
+## run
 
 ```sh
-envp --version          # envp X.Y.Z
-envp list               # first run prints how to create a profile
+envp run prod ./deploy.sh
+envp run prod --clean python app.py      # only a minimal base env plus profile vars
+envp run prod --dry-run ./deploy.sh      # print what would run, never values
+envp run prod --detach ./server.sh       # detach; envp exits immediately
 ```
 
-`envp` on its own (or `envp --help`) prints the command list plus a quick
-start.
+- By default the child gets your full environment with the profile
+  variables on top. `--clean` gives it only `PATH`, `HOME`, `USER` and a
+  few base variables plus the profile.
+- Everything after the command name goes to the child untouched. `--` is
+  only needed when the command itself starts with an envp option, e.g.
+  `envp run prod -- --clean`.
+- The child's exit code is passed through. `1` is an envp error such as a
+  wrong password, `2` a usage error, `127` command not found.
+- On unix, Ctrl-C is forwarded to the child, same as `docker run`.
 
-## Command reference
-
-| Command | Purpose | Password? |
-|---|---|---|
-| `envp import <name> (--from <file> \| --from-env) [--merge]` | Import variables into an encrypted profile | yes |
-| `envp show <name> [--reveal]` | Show variables (masked by default) | yes |
-| `envp export <name> [-o <file>]` | Export as .env text (stdout without `-o`) | yes |
-| `envp edit <name>` | Edit variables in `$EDITOR` (default `vi`) | yes |
-| `envp set <name> KEY=VALUE...` (bare `KEY` prompts, hidden) | Add or replace variables | yes |
-| `envp unset <name> KEY...` | Remove variables | yes |
-| `envp fpm-snippet <name>` | Emit php-fpm pool `env[...]` lines | yes |
-| `envp diff <a> <b>` | Compare two profiles (masked values) | yes |
-| `envp run <name> [--clean] [--dry-run] [--detach] <cmd> [args...]` | Run a command with the variables injected | yes |
-| `envp list` (alias: `envp ls`) | List profiles | no |
-| `envp rm <name>` | Delete a profile | no |
-| `envp passwd <name>` | Change the profile password | yes |
-| `envp unlock <name> [--ttl <seconds>]` | Verify + cache the password in the OS keychain (default TTL 900 s) | yes |
-| `envp lock <name>` | Remove the cached keychain entry | no |
-| `envp complete --shell <bash\|zsh\|fish\|...>` | Print shell completion script | no |
-
-**Global flag**: `--password-stdin` works with every password-requiring
-command, before or after the subcommand. Passwords are read from stdin, one
-line per prompt, in prompt order (`passwd` reads two lines: current then new;
-`diff` reads one per profile).
-
-### Import
-
-- `--from <file>` parses a `.env` file (comments, `export` prefix, quoted and
-  multi-line values are supported).
-- `--from-env` imports variables from the current environment, minus a
-  hardcoded exclusion list (`PATH`, `HOME`, `SSH_*`, `LC_*`, `TERM*`, …) so
-  you don't accidentally store system/SSH variables. `--only A,B` imports
-  exactly the listed keys; `--except A,B` excludes more keys on top of the
-  default list.
-- Importing into an existing profile fails by default; use `--merge` to fold
-  new values into it (same-name keys take the new value).
-- **dotenvy semantics**: `$VAR` references inside double-quoted or bare values
-  are expanded at import time (against earlier definitions and the actual
-  environment); single-quoted values are stored literally. If a value looks
-  like `SECRET_TOKEN=pa$$w0rd`, write it as `SECRET_TOKEN='pa$$w0rd'` in your
-  `.env` file. envp prints a note on import when values contain `$`.
-- **Export text is normalized**: key order (alphabetical) and quoting differ
-  from the source file; the key/value semantics are preserved exactly.
-
-### Set / unset
-
-- `envp set prod API_KEY=... LOG_LEVEL=debug` adds new keys and replaces
-  same-name keys. Keys must match `[A-Za-z_][A-Za-z0-9_]*`.
-- `KEY=VALUE` on the command line is visible to same-user processes (`ps`) and
-  is stored in shell history — fine for non-secrets. For a secret, pass the
-  bare key: `envp set prod API_KEY` verifies the profile password first, then
-  reads the value with hidden input (never echoed, never in history).
-- With `--password-stdin` the `KEY=VALUE` form is required: stdin lines belong
-  to the password prompts, so there is no line left for a value.
-- `envp unset prod OLD_TOKEN OLD_URL` removes keys. Unknown keys are reported
-  as a warning; the command fails only when nothing matched at all.
-- Both commands re-encrypt the profile atomically (fresh salt/nonce); the
-  password is unchanged. For bulk changes use `envp edit`.
-
-### Run
-
-- **Command and arguments**: everything from the command name onward is
-  passed to the child untouched, flags included — no `--` needed. The
-  standard `--` separator is only required when the command's first token is
-  one of envp's own options (`--clean`, `--dry-run`, `--detach`,
-  `--password-stdin`, `-h`/`--help`), e.g. `envp run prod -- --clean`; envp
-  consumes the `--` itself and never passes it to the child.
-- **Overlay (default)**: child gets the full current environment; profile
-  variables override same-name variables.
-- **`--clean`**: child gets only a minimal base environment plus the profile
-  variables — nothing else. Unix base keys: `PATH`, `HOME`, `TMPDIR`, `USER`,
-  `LOGNAME`, `SHELL`, `TERM`. Windows base keys: `PATH`, `USERPROFILE`,
-  `TMP`, `TEMP`, `SystemRoot`, `ComSpec`. Missing keys are skipped, never
-  invented.
-- **`--dry-run`**: prints the command, mode, injected key names (never
-  values) and an environment-size estimate; executes nothing.
-- **`--detach`**: starts the command detached and exits immediately; the
-  child keeps running after envp exits (unix: new session via `setsid`;
-  Windows: child naturally outlives the parent).
-- **Exit codes** (a stable interface for scripts):
-
-  | Code | Meaning |
-  |---|---|
-  | 0 | success |
-  | 1 | envp error (decryption, I/O, bad usage of args) |
-  | 2 | usage error (clap) |
-  | 126 | target has no execute permission (unix) |
-  | 127 | target not found |
-  | 128+N | child killed by signal N (Ctrl-C → 130) (unix) |
-  | other | child's own exit code, passed through 1:1 |
-
-  **Unix**: terminal signals (Ctrl-C, etc.) are caught by envp and
-  forwarded to the child's process group — the same model as
-  `timeout`/`docker run` — and the child runs with core dumps disabled
-  (`RLIMIT_CORE=0`).
-  **Windows**: the child shares envp's console group, so Ctrl-C reaches it
-  natively; there is no separate signal-forwarding layer, and the
-  process-group/core-dump hardening does not apply.
-
-### Scripts / CI
-
-`--password-stdin` is a global flag: it works with **every** password-requiring
-command, so whole pipelines can run without a tty. Passwords are read from
-stdin one line per prompt, in prompt order.
+## Scripts / CI
 
 ```sh
-# feed the password on stdin (first line); avoid ENVPOUCH_PASSPHRASE-style
-# env vars on purpose: /proc/<pid>/environ is readable by same-user processes
-printf '%s\n' "$MY_SECRET_PASSPHRASE" | envp run prod --password-stdin ./deploy.sh
-
-# the flag may also come before the subcommand, and other commands take it too
+printf '%s\n' "$PW" | envp run prod --password-stdin ./deploy.sh
 printf '%s\n' "$PW" | envp --password-stdin export prod -o /tmp/prod.env
-printf '%s\n' "$PW" | envp --password-stdin fpm-snippet prod >> pool.conf
-
-# commands that would prompt twice read two lines, in prompt order:
-#   passwd: current password first, then the new one
-printf '%s\n%s\n' "$OLD_PW" "$NEW_PW" | envp passwd prod --password-stdin
-#   diff: one line per profile (unless the keychain cache answers first)
-printf '%s\n%s\n' "$PW_A" "$PW_B" | envp diff a b --password-stdin
-
-# creating a profile headless reads the new password once (no confirmation)
-printf '%s\n' "$NEW_PW" | envp import prod --from .env.production --password-stdin
-
-# cache the password in the OS keychain for 15 minutes
-envp unlock prod --ttl 900
-envp run prod ./dev-server.sh             # no prompt
-envp lock prod                             # drop it now
 ```
 
-## PHP-FPM notes
-
-If you wrap `php-fpm` with `envp run`, three behaviors bite everyone:
-
-1. **`clear_env=yes` (FPM default) wipes the environment for workers.**
-   envp's injection only reaches the FPM *master*; `getenv()` in PHP returns
-   nothing. Fixes, in order of preference:
-   - generate pool lines with `envp fpm-snippet prod >> www.conf`
-     (adds `env[KEY] = value` per variable), or
-   - set `clear_env = no` in the pool so workers inherit the master's
-     environment.
-2. **`clear_env=yes` also clears `PATH`**, so PHP's `exec()`/`shell_exec()`
-   find no binaries. Add `env[PATH] = ...` manually — `fpm-snippet` reminds
-   you in its footer comment.
-3. **`daemonize=yes` (FPM default)**: the master forks into the background
-   and envp's direct child exits immediately, so envp returns right away.
-   **That return is success, not a failure.** With `daemonize = no`
-   (recommended under systemd/containers), envp stays in the foreground.
-
-`fpm-snippet` skips values containing newlines, quotes values containing
-`\ " ; #`, and warns about `$` (variable-reference semantics inside fpm
-config). It never prints values to stderr.
-
-## Security model
-
-**Protects**: data at rest on disk (lost laptops, backups, accidentally
-committed directories). Profiles are AES-256-GCM encrypted with a key derived
-from your password via Argon2id (m=19 MiB, t=2, p=1); every write uses a
-fresh random salt + nonce; the file header is covered by the GCM AAD so
-tampering fails decryption. Profile files are mode `0600`, the storage
-directory `0700`, writes are atomic (temp file + rename), and decrypted
-plaintext is zeroized when dropped.
-
-**Does not protect** (no tool on a general-purpose OS honestly can):
-
-- the same user reading `/proc/<pid>/environ` (Linux) or `ps eww` of your
-  running child processes;
-- root, kernel-level attackers, memory dumps, screen capture, keyloggers;
-- other variables in your shell environment that you did not move into a
-  profile (use `--clean` to shrink the set given to a child).
-
-Mitigations built in: child core dumps are disabled; passwords are never
-accepted via environment variables; `--password-stdin` exists because process
+One stdin line per password prompt, in prompt order: `passwd` reads the
+current password then the new one, `diff` reads one per profile. envp
+deliberately has no password environment variable, since process
 environments are readable by same-user processes.
 
-**There is no password recovery.** If you lose a profile's password, its data
-is unrecoverable (authenticated encryption has no backdoor). envp warns you
-when setting a password; keep backups of the password in your password
-manager.
+## php-fpm
 
-## Storage layout
+Two php-fpm defaults defeat injected variables; `fpm-snippet` exists for
+this:
 
-```
-~/.envpouch/profiles/<name>.envpouch
-```
+- `clear_env=yes` (the default) wipes the environment for workers, so
+  `getenv()` in PHP returns nothing. Append
+  `envp fpm-snippet prod >> www.conf` to emit one `env[KEY] = value` line
+  per variable, or set `clear_env = no` in the pool.
+- `daemonize=yes` (the default) forks the master into the background, so
+  envp returns immediately. That is success, not failure. Under systemd,
+  use `daemonize = no`.
 
-File format v1: `magic "ENVPOUCH" | version | salt(16B) | argon2 params |
-nonce(12B) | var_count | updated_at | AES-256-GCM ciphertext`. The variable
-count and update time are plaintext metadata so `envp list` works without a
-password; everything else is ciphertext.
+## Files
 
-## Operations
-
-**Storage location override** — for containers, service accounts, or
-multi-instance isolation, point envp at a different base directory:
+Profiles live in `~/.envpouch/profiles/<name>.envpouch`, each a
+self-contained encrypted file. Back them up by copying the directory.
 
 ```sh
-export ENVPOUCH_HOME=/var/lib/myapp/envpouch   # profiles live in $ENVPOUCH_HOME/profiles
+export ENVPOUCH_HOME=/var/lib/myapp/envpouch   # move storage elsewhere
+export ENVPOUCH_AUDIT=1                        # log each decrypting command to audit.log
 ```
 
-**Audit trail** (off by default) — set `ENVPOUCH_AUDIT=1` to append one line per
-decrypting invocation to `$ENVPOUCH_HOME/audit.log`:
+The audit log records timestamp, command, profile and exit code, never
+variable names or values.
 
 ```sh
-export ENVPOUCH_AUDIT=1
-envp run prod ./deploy.sh
-tail -1 "$HOME/.envpouch/audit.log"    # 2026-11-06T09:12:00+0800	run	prod	exit=0
-```
-
-The audit log records timestamp, subcommand, profile name and exit code
-only — never variable keys or values. Writes are best-effort: a failed audit
-write warns on stderr but does not fail the command.
-
-**Shell completions**:
-
-```sh
-envp complete --shell bash  > ~/.local/share/bash-completion/completions/envp
-envp complete --shell zsh   > "${fpath[1]}/_envp"   # zsh
+envp complete --shell bash > ~/.local/share/bash-completion/completions/envp
+envp complete --shell zsh   > "${fpath[1]}/_envp"
 envp complete --shell fish  > ~/.config/fish/completions/envp.fish
 ```
 
-**Prebuilt binaries** — tagged releases (`v*`) publish glibc binaries
-(x86_64/aarch64 Linux), a universal2 macOS build, and an x86_64 Windows
-build (MSVC, `.zip`) with SHA-256 checksums on the GitHub Releases page;
-the same binaries are bundled in the npm package;
-`scripts/fuzz_cli.sh` and `cargo test` gate every CI run.
+## Security
 
-**Backup / restore** — profile files are self-contained encrypted blobs;
-backing up the profiles directory with any file-level tool is sufficient.
-Keep profile passwords in a password manager: a lost password cannot be
-recovered from any backup (they are encrypted with the same password).
+Profiles are encrypted with AES-256-GCM, keys derived via Argon2id, fresh
+salt and nonce on every write, atomic writes, files mode 0600. This
+protects data at rest: lost laptops, backups, accidentally committed
+directories.
 
-## Known limitations
+It does not protect against the same user reading a running process's
+environment (`/proc/<pid>/environ`, `ps eww`), root, or keyloggers. No
+tool on a general-purpose OS can. Use `--clean` to shrink what a child
+process sees.
 
-- Exported/edited text is normalized (alphabetical keys, canonical quoting);
-  comments and original formatting of the source `.env` are not preserved.
-- `edit` keeps a plaintext temp file (mode 0600, in `$TMPDIR`) only while the
-  editor is open, and cleans up leftovers from killed sessions on the next
-  run. `$EDITOR` may carry arguments (e.g. `EDITOR='code --wait'`); it is
-  split on whitespace, so an editor path containing spaces cannot be quoted.
-- **Ctrl-Z under `run` (unix)**: Ctrl-Z stops the child, but envp itself
-  keeps running and holds the terminal — the shell never sees a stopped job,
-  so `fg` cannot resume it. Ctrl-C still works (it kills the stopped child
-  and envp exits 130); to resume the child instead, run
-  `kill -CONT <child-pid>` from another terminal.
-- **Windows differences** (functional but not identical to unix): no
-  signal-forwarding layer — Ctrl-C reaches the child natively via the shared
-  console group, and 128+N exit codes do not occur; core dumps are a unix
-  concept so the `RLIMIT_CORE` hardening does not apply; file modes are NTFS
-  ACLs, so the explicit 0600/0700 hardening is a no-op (use ACLs on the
-  profile directory if you need per-user restrictions); the keychain cache
-  uses Windows Credential Manager via `envp unlock`/`envp lock`.
+## Limitations
+
+- Export and edit rewrite the profile in canonical form (alphabetical
+  keys); comments and formatting from the source `.env` are not kept.
+- `edit` briefly keeps a plaintext temp file (mode 0600) while the editor
+  is open.
+- Ctrl-Z under `run` does not suspend envp. Ctrl-C still works; to resume
+  the child, `kill -CONT <pid>` from another terminal.
+- On Windows there is no signal-forwarding layer (Ctrl-C reaches the child
+  via the shared console) and file permissions are NTFS ACLs rather than
+  0600.
