@@ -55,6 +55,32 @@ impl Default for KdfParams {
     }
 }
 
+/// A password-derived key plus the salt/params it was derived with.
+///
+/// Kept across a decrypt→re-encrypt cycle so mutating commands (set/unset/
+/// edit/merge) run Argon2 once instead of twice: re-encryption reuses the
+/// key and only draws a fresh nonce. The profile file keeps its salt; GCM
+/// only requires nonce uniqueness per key, and nonces are 96-bit random
+/// per write, so reuse is safe well beyond any CLI's write count.
+pub struct DerivedKey {
+    key: Zeroizing<[u8; KEY_LEN]>,
+    salt: [u8; SALT_LEN],
+    params: KdfParams,
+}
+
+impl DerivedKey {
+    /// Derive from a password with a fresh random salt (new profiles,
+    /// password changes).
+    pub fn fresh(password: &str) -> Result<Self> {
+        let params = KdfParams::default();
+        validate_kdf_params(params.m_cost, params.t_cost, params.p_cost)?;
+        let mut salt = [0u8; SALT_LEN];
+        getrandom(&mut salt).map_err(|e| anyhow!("failed to generate random salt: {e}"))?;
+        let key = derive_key(password, &salt, params)?;
+        Ok(Self { key, salt, params })
+    }
+}
+
 /// Plaintext metadata that can be read without decryption
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileMeta {
@@ -105,24 +131,30 @@ fn derive_key(
     Ok(key)
 }
 
-/// Encrypt plaintext and serialize into complete profile file bytes.
+/// Encrypt plaintext and serialize into complete profile file bytes,
+/// deriving the key from the password with a fresh random salt.
 pub fn encrypt(plaintext: &[u8], password: &str, meta: FileMeta) -> Result<Vec<u8>> {
-    let params = KdfParams::default();
-    validate_kdf_params(params.m_cost, params.t_cost, params.p_cost)?;
+    encrypt_derived(plaintext, &DerivedKey::fresh(password)?, meta)
+}
 
-    let mut salt = [0u8; SALT_LEN];
-    getrandom(&mut salt).map_err(|e| anyhow!("failed to generate random salt: {e}"))?;
-    let key = derive_key(password, &salt, params)?;
+/// Encrypt with an already-derived key: the profile keeps its salt/params
+/// and gets a fresh random nonce.
+pub fn encrypt_derived(plaintext: &[u8], derived: &DerivedKey, meta: FileMeta) -> Result<Vec<u8>> {
+    validate_kdf_params(
+        derived.params.m_cost,
+        derived.params.t_cost,
+        derived.params.p_cost,
+    )?;
 
     let mut header = Vec::with_capacity(HEADER_LEN);
     header.extend_from_slice(MAGIC);
     header.push(FORMAT_VERSION);
-    header.extend_from_slice(&salt);
-    header.extend_from_slice(&params.m_cost.to_le_bytes());
-    header.extend_from_slice(&params.t_cost.to_le_bytes());
-    header.extend_from_slice(&params.p_cost.to_le_bytes());
+    header.extend_from_slice(&derived.salt);
+    header.extend_from_slice(&derived.params.m_cost.to_le_bytes());
+    header.extend_from_slice(&derived.params.t_cost.to_le_bytes());
+    header.extend_from_slice(&derived.params.p_cost.to_le_bytes());
 
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key[..]));
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&derived.key[..]));
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     header.extend_from_slice(nonce.as_slice());
     header.extend_from_slice(&meta.var_count.to_le_bytes());
@@ -144,6 +176,12 @@ pub fn encrypt(plaintext: &[u8], password: &str, meta: FileMeta) -> Result<Vec<u
 
 /// Decrypt profile file bytes. Returns an error on wrong password or tampered content.
 pub fn decrypt(blob: &[u8], password: &str) -> Result<Decrypted> {
+    Ok(decrypt_derived(blob, password)?.0)
+}
+
+/// Decrypt and also return the derived key, so a verified password can
+/// re-encrypt the profile without a second KDF pass.
+pub fn decrypt_derived(blob: &[u8], password: &str) -> Result<(Decrypted, DerivedKey)> {
     if blob.len() < HEADER_LEN + TAG_LEN {
         bail!("file too small to be a valid envpouch profile");
     }
@@ -175,17 +213,14 @@ pub fn decrypt(blob: &[u8], password: &str) -> Result<Decrypted> {
     debug_assert_eq!(off + 8, HEADER_LEN);
 
     validate_kdf_params(m_cost, t_cost, p_cost)?;
+    let params = KdfParams {
+        m_cost,
+        t_cost,
+        p_cost,
+    };
 
     let (header, ciphertext) = blob.split_at(HEADER_LEN);
-    let key = derive_key(
-        password,
-        &salt,
-        KdfParams {
-            m_cost,
-            t_cost,
-            p_cost,
-        },
-    )?;
+    let key = derive_key(password, &salt, params)?;
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key[..]));
     let plaintext = cipher
         .decrypt(
@@ -197,13 +232,16 @@ pub fn decrypt(blob: &[u8], password: &str) -> Result<Decrypted> {
         )
         .map_err(|_| anyhow!("wrong password or profile file is corrupted"))?;
 
-    Ok(Decrypted {
-        plaintext: Zeroizing::new(plaintext),
-        meta: FileMeta {
-            var_count,
-            updated_at,
+    Ok((
+        Decrypted {
+            plaintext: Zeroizing::new(plaintext),
+            meta: FileMeta {
+                var_count,
+                updated_at,
+            },
         },
-    })
+        DerivedKey { key, salt, params },
+    ))
 }
 
 /// Parse only the plaintext header metadata (used by `list`, no password needed).
@@ -300,5 +338,30 @@ mod tests {
         let m_off = MAGIC.len() + 1 + SALT_LEN;
         blob[m_off..m_off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(decrypt(&blob, "pw123456").is_err());
+    }
+
+    #[test]
+    fn derived_key_roundtrip_preserves_salt_and_rotates_nonce() {
+        let blob1 = encrypt(b"old payload", "pw123456", sample_meta()).unwrap();
+        let (_, derived) = decrypt_derived(&blob1, "pw123456").unwrap();
+        let meta2 = FileMeta {
+            var_count: 7,
+            updated_at: 99,
+        };
+        let blob2 = encrypt_derived(b"new payload", &derived, meta2).unwrap();
+
+        // salt + KDF params region is preserved; only the nonce is fresh
+        let stable = MAGIC.len() + 1..MAGIC.len() + 1 + SALT_LEN + 12;
+        assert_eq!(blob1[stable.clone()], blob2[stable]);
+        let dec2 = decrypt(&blob2, "pw123456").unwrap();
+        assert_eq!(dec2.plaintext.as_slice(), b"new payload");
+        assert_eq!(dec2.meta, meta2);
+
+        // a second write under the same key draws a new nonce/ciphertext
+        let blob3 = encrypt_derived(b"new payload", &derived, meta2).unwrap();
+        // nonce sits between the KDF params and var_count
+        let nonce = HEADER_LEN - 24..HEADER_LEN - 12;
+        assert_ne!(blob2[nonce.clone()], blob3[nonce]);
+        assert_ne!(blob2[HEADER_LEN..], blob3[HEADER_LEN..]);
     }
 }

@@ -15,8 +15,7 @@ use zeroize::Zeroizing;
 pub struct EnvVars(BTreeMap<String, String>);
 
 impl EnvVars {
-    /// Test/construction helper
-    #[allow(dead_code)]
+    /// Construction helper (tests and `import --from-env`)
     pub fn from_map(map: BTreeMap<String, String>) -> Self {
         Self(map)
     }
@@ -27,6 +26,12 @@ impl EnvVars {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Look up one variable's value.
+    #[allow(dead_code)] // small accessor for callers; exercised by tests
+    pub fn get(&self, key: &str) -> Option<&String> {
+        self.0.get(key)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
@@ -208,6 +213,13 @@ mod tests {
     fn parse_error_reported() {
         let path = write_temp_env("INVALID KEY LINE WITHOUT EQUALS\n");
         assert!(EnvVars::parse_file(&path).is_err());
+    }
+
+    #[test]
+    fn get_looks_up_by_key() {
+        let vars = EnvVars::from_map(BTreeMap::from([("A".to_string(), "1".to_string())]));
+        assert_eq!(vars.get("A").map(String::as_str), Some("1"));
+        assert!(vars.get("B").is_none());
     }
 
     #[test]

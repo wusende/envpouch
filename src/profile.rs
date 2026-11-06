@@ -108,6 +108,15 @@ pub fn delete(name: &str) -> Result<()> {
         .with_context(|| format!("failed to delete profile file: {}", path.display()))
 }
 
+/// Rename a profile file (name guards live in `commands::mv`).
+#[allow(dead_code)] // wired up by the upcoming `mv` command
+pub fn rename(src: &str, dst: &str) -> Result<()> {
+    let from = profile_path(src)?;
+    let to = profile_path(dst)?;
+    fs::rename(&from, &to)
+        .with_context(|| format!("failed to rename {} to {}", from.display(), to.display()))
+}
+
 pub struct ProfileMeta {
     pub name: String,
     pub var_count: u32,

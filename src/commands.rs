@@ -1,5 +1,6 @@
 //! Implementations of the subcommands.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
@@ -35,6 +36,21 @@ fn obtain_password(name: &str, password_stdin: bool, prompt: &str) -> Result<Zer
         return Ok(pw);
     }
     prompt_password(prompt)
+}
+
+/// Open an existing profile: read it, acquire the password (stdin → keychain
+/// → prompt), decrypt, parse. The derived key is returned so callers that
+/// re-save can skip a second KDF pass. Shared by every decrypting command.
+fn open_profile(name: &str, password_stdin: bool) -> Result<(EnvVars, crypto::DerivedKey)> {
+    let blob = profile::read(name)?;
+    let password = obtain_password(
+        name,
+        password_stdin,
+        &format!("Enter password for profile '{name}': "),
+    )?;
+    let (decrypted, derived) = crypto::decrypt_derived(&blob, password.as_str())?;
+    let vars = EnvVars::from_json(&decrypted.plaintext)?;
+    Ok((vars, derived))
 }
 
 /// New-password setup. Interactive: type twice to confirm with one retry on
@@ -113,6 +129,9 @@ pub fn import_command(
     merge: bool,
     password_stdin: bool,
 ) -> Result<()> {
+    if only.is_some() && except.is_some() {
+        bail!("--only and --except are mutually exclusive");
+    }
     match (from, from_env) {
         (Some(f), false) => import_from_file(name, &f, merge, password_stdin),
         (None, true) => import_from_env(name, only, except, merge, password_stdin),
@@ -127,7 +146,7 @@ fn import_from_file(name: &str, from: &Path, merge: bool, password_stdin: bool) 
     }
     let new_vars = EnvVars::parse_file(from)?;
     require_valid_keys(&new_vars)?;
-    import_vars(name, new_vars, merge, 0, password_stdin)
+    import_vars(name, new_vars, merge, "", password_stdin)
 }
 
 /// `import --from-env`: grab variables from the current process environment.
@@ -143,14 +162,15 @@ fn import_from_env(
     let only_list = only.as_ref().map(|s| parse_key_list(s));
     let except_list = except.as_ref().map(|s| parse_key_list(s));
 
-    let mut map = std::collections::BTreeMap::new();
-    let mut skipped = 0usize;
+    let mut map = BTreeMap::new();
+    let mut skipped_filtered = 0usize;
+    let mut skipped_non_utf8 = 0usize;
     for (k, v) in std::env::vars_os() {
         let (k, v) = match (k.into_string(), v.into_string()) {
             (Ok(k), Ok(v)) => (k, v),
             // Non-UTF-8 entries cannot be stored in a .env profile
             _ => {
-                skipped += 1;
+                skipped_non_utf8 += 1;
                 continue;
             }
         };
@@ -162,14 +182,36 @@ fn import_from_env(
             !exclude::is_excluded(&k)
         };
         if !take {
-            skipped += 1;
+            skipped_filtered += 1;
             continue;
         }
         map.insert(k, v);
     }
     let vars = EnvVars::from_map(map);
     require_valid_keys(&vars)?;
-    import_vars(name, vars, merge, skipped, password_stdin)
+    let note = format_skipped_note(only.is_some(), skipped_filtered, skipped_non_utf8);
+    import_vars(name, vars, merge, &note, password_stdin)
+}
+
+/// Parenthesized suffix for the import summary line: names why variables
+/// were left out instead of lumping non-UTF-8 entries into the filter count.
+fn format_skipped_note(only_mode: bool, filtered: usize, non_utf8: usize) -> String {
+    let mut parts = Vec::new();
+    if filtered > 0 {
+        if only_mode {
+            parts.push(format!("{filtered} not selected by --only"));
+        } else {
+            parts.push(format!("{filtered} skipped by exclusion list"));
+        }
+    }
+    if non_utf8 > 0 {
+        parts.push(format!("{non_utf8} not valid UTF-8"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    }
 }
 
 /// Fail fast (spec §4.4/§5.1): report every invalid key, then reject the
@@ -209,16 +251,17 @@ fn validate_stored_keys(vars: &EnvVars) -> Result<()> {
     );
 }
 
-/// Encrypt and atomically write `vars` under an already-verified password.
-/// Fresh salt/nonce per call (see `crypto::encrypt`); shared by
-/// import/set/unset/passwd so every rewrite has the same metadata handling.
-fn save_profile(name: &str, vars: &EnvVars, password: &str) -> Result<()> {
+/// Encrypt and atomically write `vars` under an already-derived key.
+/// Reuses the profile's salt and draws a fresh nonce (see
+/// `crypto::encrypt_derived`); for a new profile or a password change,
+/// derive first via `crypto::DerivedKey::fresh`.
+fn save_profile(name: &str, vars: &EnvVars, derived: &crypto::DerivedKey) -> Result<()> {
     let payload = vars.to_json()?;
     let meta = FileMeta {
         var_count: vars.len() as u32,
         updated_at: now_unix()?,
     };
-    let blob = crypto::encrypt(&payload, password, meta)?;
+    let blob = crypto::encrypt_derived(&payload, derived, meta)?;
     profile::write(name, &blob)
 }
 
@@ -279,27 +322,25 @@ fn resolve_prompted(parsed: Vec<Assignment>) -> Result<Vec<(String, String)>> {
 
 /// `envp set <name> KEY=VALUE...` (bare `KEY` prompts for the value).
 ///
-/// The password is verified like every other decrypting command; the profile
-/// is then re-encrypted with a fresh salt/nonce. `KEY=VALUE` exposes the value
-/// to `ps`/shell history — use the bare form for secrets.
+/// Creates the profile when it does not exist (prompting for a new
+/// password), so a profile can be built from scratch without a .env file.
+/// `KEY=VALUE` exposes the value to `ps`/shell history — use the bare form
+/// for secrets.
 pub fn set(name: &str, assignments: &[String], password_stdin: bool) -> Result<()> {
     profile::validate_name(name)?;
-    if !profile::exists(name)? {
-        bail!(
-            "profile '{name}' does not exist (create it with \
-             `envp import <name> --from <env-file>`)"
-        );
-    }
     let parsed = parse_assignments(assignments, password_stdin)?;
 
-    let blob = profile::read(name)?;
-    let password = obtain_password(
-        name,
-        password_stdin,
-        &format!("Enter password for profile '{name}': "),
-    )?;
-    let decrypted = crypto::decrypt(&blob, password.as_str())?;
-    let mut vars = EnvVars::from_json(&decrypted.plaintext)?;
+    let existed = profile::exists(name)?;
+    let (mut vars, derived) = if existed {
+        open_profile(name, password_stdin)?
+    } else {
+        let password = new_password(password_stdin)?;
+        (
+            EnvVars::default(),
+            crypto::DerivedKey::fresh(password.as_str())?,
+        )
+    };
+
     let pairs = resolve_prompted(parsed)?;
 
     let (mut added, mut replaced) = (0usize, 0usize);
@@ -311,9 +352,10 @@ pub fn set(name: &str, assignments: &[String], password_stdin: bool) -> Result<(
         }
     }
 
-    save_profile(name, &vars, password.as_str())?;
+    save_profile(name, &vars, &derived)?;
+    let verb = if existed { "updated" } else { "created" };
     out_line(format!(
-        "Profile '{name}' updated: {added} added, {replaced} replaced ({} variables)",
+        "Profile '{name}' {verb}: {added} added, {replaced} replaced ({} variables)",
         vars.len()
     ))
 }
@@ -323,23 +365,13 @@ pub fn set(name: &str, assignments: &[String], password_stdin: bool) -> Result<(
 pub fn unset(name: &str, keys: &[String], password_stdin: bool) -> Result<()> {
     profile::validate_name(name)?;
     if !profile::exists(name)? {
-        bail!(
-            "profile '{name}' does not exist (create it with \
-             `envp import <name> --from <env-file>`)"
-        );
+        bail!("profile '{name}' does not exist (create it with `envp set` or `envp import`)");
     }
     for key in keys {
         envfile::validate_key(key, "")?;
     }
 
-    let blob = profile::read(name)?;
-    let password = obtain_password(
-        name,
-        password_stdin,
-        &format!("Enter password for profile '{name}': "),
-    )?;
-    let decrypted = crypto::decrypt(&blob, password.as_str())?;
-    let mut vars = EnvVars::from_json(&decrypted.plaintext)?;
+    let (mut vars, derived) = open_profile(name, password_stdin)?;
 
     let mut removed = 0usize;
     let mut missing = Vec::new();
@@ -358,7 +390,7 @@ pub fn unset(name: &str, keys: &[String], password_stdin: bool) -> Result<()> {
         );
     }
 
-    save_profile(name, &vars, password.as_str())?;
+    save_profile(name, &vars, &derived)?;
     out_line(format!(
         "Profile '{name}' updated: {removed} removed ({} variables)",
         vars.len()
@@ -369,52 +401,41 @@ pub fn unset(name: &str, keys: &[String], password_stdin: bool) -> Result<()> {
     Ok(())
 }
 
-/// Shared import pipeline. `skipped` counts variables excluded by the
-/// exclusion list (--from-env); always 0 for --from.
+/// Shared import pipeline. `skipped_note` is the preformatted suffix from
+/// `format_skipped_note` (empty for `--from`, where nothing is filtered).
 fn import_vars(
     name: &str,
     new_vars: EnvVars,
     merge: bool,
-    skipped: usize,
+    skipped_note: &str,
     password_stdin: bool,
 ) -> Result<()> {
     let existed = profile::exists(name)?;
     if existed && !merge {
         bail!("profile '{name}' already exists (use --merge to merge into it)");
     }
-    let password = if existed {
+    let (vars, derived) = if existed {
         // Merging must verify the existing password; it stays unchanged
-        obtain_password(
-            name,
-            password_stdin,
-            &format!("Enter existing password for profile '{name}': "),
-        )?
-    } else {
-        new_password(password_stdin)?
-    };
-
-    let vars = if existed {
-        let blob = profile::read(name)?;
-        let decrypted = crypto::decrypt(&blob, password.as_str())?;
-        let existing = EnvVars::from_json(&decrypted.plaintext)?;
+        let (existing, derived) = open_profile(name, password_stdin)?;
         let mut merged = existing;
         let (added, updated) = merged.merge(new_vars);
         eprintln!("Merge result: {added} added, {updated} updated");
-        merged
+        (merged, derived)
     } else {
-        new_vars
+        let password = new_password(password_stdin)?;
+        (new_vars, crypto::DerivedKey::fresh(password.as_str())?)
     };
 
     if vars.is_empty() {
         eprintln!("warning: no environment variables were imported");
     }
 
-    save_profile(name, &vars, password.as_str())?;
+    save_profile(name, &vars, &derived)?;
 
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "Profile '{name}' written: {} variables ({skipped} skipped by exclusion list)",
+        "Profile '{name}' written: {} variables{skipped_note}",
         vars.len()
     );
     for (k, _) in vars.iter() {
@@ -1120,7 +1141,8 @@ pub fn passwd(name: &str, password_stdin: bool) -> Result<()> {
     let vars = EnvVars::from_json(&decrypted.plaintext)?;
 
     let new = new_password(password_stdin)?;
-    save_profile(name, &vars, new.as_str())?;
+    let derived = crypto::DerivedKey::fresh(new.as_str())?;
+    save_profile(name, &vars, &derived)?;
     let _ = keycache::clear(name);
     out_line(format!("Password changed for profile '{name}'"))
 }
