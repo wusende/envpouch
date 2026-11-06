@@ -5,8 +5,10 @@
 //! smallest possible secret propagation surface). Written best-effort: a
 //! failed audit write warns on stderr but never fails the command itself.
 //!
-//! `run` on unix writes `exec` immediately before replacing its image; the
-//! target's exit code is no longer observable by envp at that point.
+//! `run` on unix writes `exec` immediately before replacing its image. On
+//! success no second line follows; on exec failure envp additionally
+//! records its own nonzero `exit=` code, so `exec` directly followed by
+//! `exit=N` means the target never started.
 
 use std::io::Write;
 
