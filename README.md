@@ -19,9 +19,17 @@ OS keychain cache (`envrun unlock`), or `--password-stdin` for scripts.
 Requires Rust 1.85+ (edition 2024).
 
 ```sh
-cargo build --release
-# binary at ./target/release/envrun
+cargo install --path .    # installs to ~/.cargo/bin (usually already on PATH)
+# or just build locally:
+cargo build --release     # binary at ./target/release/envrun
 cargo test --release
+```
+
+After installing, verify with:
+
+```sh
+envrun --version
+envrun list               # first run prints how to create a profile
 ```
 
 ## Command reference
