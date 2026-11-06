@@ -1,6 +1,6 @@
 {
   "name": "envpouch",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Encrypted environment variable profile manager: import, export and run with password-protected profiles. Command: `envp`.",
   "license": "MIT",
   "author": "wusende",
