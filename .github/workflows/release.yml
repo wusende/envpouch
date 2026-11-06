@@ -84,7 +84,7 @@ jobs:
         run: cargo build --release --locked --target x86_64-unknown-linux-musl
       - name: Smoke test
         run: |
-          file target/x86_64-unknown-linux-musl/release/envp | grep -q statically
+          file target/x86_64-unknown-linux-musl/release/envp | grep -qE 'static-pie linked|statically linked'
           target/x86_64-unknown-linux-musl/release/envp --version
       - name: Package
         run: |
