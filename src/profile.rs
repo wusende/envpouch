@@ -99,6 +99,26 @@ pub fn read(name: &str) -> Result<Vec<u8>> {
     fs::read(&path).with_context(|| format!("failed to read profile: {}", path.display()))
 }
 
+/// Rename a profile file in place (same directory, atomic on unix). The
+/// destination must not exist — `fs::rename` would silently overwrite it.
+pub fn rename(old_name: &str, new_name: &str) -> Result<()> {
+    let from = profile_path(old_name)?;
+    let to = profile_path(new_name)?;
+    if !from.exists() {
+        bail!("profile '{old_name}' does not exist (see `envp list`)");
+    }
+    if to.exists() {
+        bail!("profile '{new_name}' already exists (see `envp list`)");
+    }
+    fs::rename(&from, &to).with_context(|| {
+        format!(
+            "failed to rename profile: {} -> {}",
+            from.display(),
+            to.display()
+        )
+    })
+}
+
 pub fn delete(name: &str) -> Result<()> {
     let path = profile_path(name)?;
     if !path.exists() {
@@ -106,15 +126,6 @@ pub fn delete(name: &str) -> Result<()> {
     }
     fs::remove_file(&path)
         .with_context(|| format!("failed to delete profile file: {}", path.display()))
-}
-
-/// Rename a profile file (name guards live in `commands::mv`).
-#[allow(dead_code)] // wired up by the upcoming `mv` command
-pub fn rename(src: &str, dst: &str) -> Result<()> {
-    let from = profile_path(src)?;
-    let to = profile_path(dst)?;
-    fs::rename(&from, &to)
-        .with_context(|| format!("failed to rename {} to {}", from.display(), to.display()))
 }
 
 pub struct ProfileMeta {

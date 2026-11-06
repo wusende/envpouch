@@ -36,12 +36,14 @@ const PATTERNS: &[&str] = &[
     "KONSOLE_*",
     "VTE_VERSION",
     "TERMINFO",
+    "TERMINFO_DIRS",
     "LS_COLORS",
     "COLORFGBG",
     "WINDOWID",
     "GNOME_*",
     "KDE_*",
     "DESKTOP_*",
+    "TMUX_*",
     // shell state/history
     "HIST*",
     "ZSH*",
@@ -83,6 +85,8 @@ const PATTERNS: &[&str] = &[
     "PUBLIC",
     "ALLUSERSPROFILE",
     "PSMODULEPATH",
+    "OneDrive*",
+    "COMPUTERNAME",
 ];
 
 /// Exact-name or prefix-wildcard matching, ASCII case-insensitive.
@@ -178,6 +182,7 @@ mod tests {
         for key in [
             "WINDOWID",
             "TERMINFO",
+            "TERMINFO_DIRS",
             "LS_COLORS",
             "SHLVL",
             "HOSTNAME",
@@ -190,6 +195,11 @@ mod tests {
             "LOCALAPPDATA",
             "USERPROFILE",
             "PUBLIC",
+            "OneDrive",
+            "OneDriveCommercial",
+            "COMPUTERNAME",
+            "TMUX_PANE",
+            "MAIL",
         ] {
             assert!(is_excluded(key), "{key} should be excluded");
         }

@@ -1,6 +1,7 @@
 //! Implementations of the subcommands.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
@@ -323,7 +324,7 @@ fn resolve_prompted(parsed: Vec<Assignment>) -> Result<Vec<(String, String)>> {
 /// `envp set <name> KEY=VALUE...` (bare `KEY` prompts for the value).
 ///
 /// Creates the profile when it does not exist (prompting for a new
-/// password), so a profile can be built from scratch without a .env file.
+/// password), so a profile can be built from scratch without an .env file.
 /// `KEY=VALUE` exposes the value to `ps`/shell history — use the bare form
 /// for secrets.
 pub fn set(name: &str, assignments: &[String], password_stdin: bool) -> Result<()> {
@@ -454,15 +455,7 @@ fn import_vars(
 
 /// `envp show <name> [--reveal]`
 pub fn show(name: &str, reveal: bool, password_stdin: bool) -> Result<()> {
-    profile::validate_name(name)?;
-    let blob = profile::read(name)?;
-    let password = obtain_password(
-        name,
-        password_stdin,
-        &format!("Enter password for profile '{name}': "),
-    )?;
-    let decrypted = crypto::decrypt(&blob, password.as_str())?;
-    let vars = EnvVars::from_json(&decrypted.plaintext)?;
+    let (vars, _) = open_profile(name, password_stdin)?;
 
     if reveal {
         eprintln!("warning: output contains plaintext secrets");
@@ -479,15 +472,7 @@ pub fn show(name: &str, reveal: bool, password_stdin: bool) -> Result<()> {
 
 /// `envp export <name> [-o <file>]`
 pub fn export(name: &str, output: Option<PathBuf>, password_stdin: bool) -> Result<()> {
-    profile::validate_name(name)?;
-    let blob = profile::read(name)?;
-    let password = obtain_password(
-        name,
-        password_stdin,
-        &format!("Enter password for profile '{name}': "),
-    )?;
-    let decrypted = crypto::decrypt(&blob, password.as_str())?;
-    let vars = EnvVars::from_json(&decrypted.plaintext)?;
+    let (vars, _) = open_profile(name, password_stdin)?;
     let text = vars.to_env_text();
 
     match output {
@@ -509,16 +494,8 @@ pub fn export(name: &str, output: Option<PathBuf>, password_stdin: bool) -> Resu
 /// `envp edit <name>` (spec §5.3): decrypt into a 0600 temp file, open
 /// $EDITOR (default vi), parse back, re-encrypt atomically.
 pub fn edit(name: &str, password_stdin: bool) -> Result<()> {
-    profile::validate_name(name)?;
     cleanup_edit_leftovers();
-    let blob = profile::read(name)?;
-    let password = obtain_password(
-        name,
-        password_stdin,
-        &format!("Enter password for profile '{name}': "),
-    )?;
-    let decrypted = crypto::decrypt(&blob, password.as_str())?;
-    let vars = EnvVars::from_json(&decrypted.plaintext)?;
+    let (vars, key) = open_profile(name, password_stdin)?;
 
     let editor = split_editor(std::env::var("EDITOR").ok().as_deref());
     let tmp = tempfile::Builder::new()
@@ -554,13 +531,7 @@ pub fn edit(name: &str, password_stdin: bool) -> Result<()> {
 
     let new_vars = EnvVars::parse_file(&path)?;
     require_valid_keys(&new_vars)?;
-    let payload = new_vars.to_json()?;
-    let meta = FileMeta {
-        var_count: new_vars.len() as u32,
-        updated_at: now_unix()?,
-    };
-    let new_blob = crypto::encrypt(&payload, password.as_str(), meta)?;
-    profile::write(name, &new_blob)?;
+    save_profile(name, &new_vars, &key)?;
 
     if tmp.close().is_err() {
         eprintln!("warning: could not delete temp file {}", path.display());
@@ -627,15 +598,7 @@ fn cleanup_edit_leftovers_in(dir: &Path, stale_after: std::time::Duration) {
 /// `envp fpm-snippet <name>` (spec §4.7): emit php-fpm pool `env[...]`
 /// lines on stdout.
 pub fn fpm_snippet(name: &str, password_stdin: bool) -> Result<()> {
-    profile::validate_name(name)?;
-    let blob = profile::read(name)?;
-    let password = obtain_password(
-        name,
-        password_stdin,
-        &format!("Enter password for profile '{name}': "),
-    )?;
-    let decrypted = crypto::decrypt(&blob, password.as_str())?;
-    let vars = EnvVars::from_json(&decrypted.plaintext)?;
+    let (vars, _) = open_profile(name, password_stdin)?;
 
     eprintln!("warning: output contains plaintext secrets - do not paste into logs or commit it");
     let mut out = String::new();
@@ -661,7 +624,6 @@ pub fn fpm_snippet(name: &str, password_stdin: bool) -> Result<()> {
             dollar_keys.join(", ")
         );
     }
-    eprintln!("warning: output contains plaintext secrets - do not paste into logs or commit it");
     Ok(())
 }
 
@@ -687,35 +649,22 @@ pub(crate) fn fpm_line(key: &str, value: &str) -> String {
 /// `envp diff <a> <b>` (spec §9 M4): show key-level differences with
 /// masked values.
 pub fn diff(name_a: &str, name_b: &str, password_stdin: bool) -> Result<()> {
-    profile::validate_name(name_a)?;
-    profile::validate_name(name_b)?;
     if name_a == name_b {
         bail!("cannot diff a profile with itself");
     }
-    let blob_a = profile::read(name_a)?;
-    let pw_a = obtain_password(
-        name_a,
-        password_stdin,
-        &format!("Enter password for profile '{name_a}': "),
-    )?;
-    let vars_a = EnvVars::from_json(&crypto::decrypt(&blob_a, pw_a.as_str())?.plaintext)?;
+    let (vars_a, _) = open_profile(name_a, password_stdin)?;
+    let (vars_b, _) = open_profile(name_b, password_stdin)?;
 
-    let blob_b = profile::read(name_b)?;
-    let pw_b = obtain_password(
-        name_b,
-        password_stdin,
-        &format!("Enter password for profile '{name_b}': "),
-    )?;
-    let vars_b = EnvVars::from_json(&crypto::decrypt(&blob_b, pw_b.as_str())?.plaintext)?;
-
+    // Key matching goes through EnvVars::get (O(log n) lookups), not linear
+    // rescans of the other map — the old nested iteration was O(n²).
     let mut only_a: Vec<&str> = Vec::new();
     let mut only_b: Vec<&str> = Vec::new();
     let mut changed = Vec::new();
     let mut same = 0usize;
     for (k, va) in vars_a.iter() {
-        match vars_b.iter().find(|(kb, _)| *kb == k) {
+        match vars_b.get(k) {
             None => only_a.push(k.as_str()),
-            Some((_, vb)) => {
+            Some(vb) => {
                 if va == vb {
                     same += 1;
                 } else {
@@ -725,7 +674,7 @@ pub fn diff(name_a: &str, name_b: &str, password_stdin: bool) -> Result<()> {
         }
     }
     for (k, _) in vars_b.iter() {
-        if vars_a.iter().all(|(ka, _)| ka != k) {
+        if vars_a.get(k).is_none() {
             only_b.push(k.as_str());
         }
     }
@@ -785,14 +734,7 @@ pub fn run(
     if command.is_empty() {
         bail!("missing command to execute");
     }
-    let blob = profile::read(name)?;
-    let password = obtain_password(
-        name,
-        password_stdin,
-        &format!("Enter password for profile '{name}': "),
-    )?;
-    let decrypted = crypto::decrypt(&blob, password.as_str())?;
-    let vars = EnvVars::from_json(&decrypted.plaintext)?;
+    let (vars, _) = open_profile(name, password_stdin)?;
     // Stored data is trusted per spec §4.4 (validated at import/edit time),
     // but a hand-crafted payload must still fail cleanly here instead of
     // panicking inside `Command::env` (keys containing '=' or NUL).
@@ -940,13 +882,7 @@ const CLEAN_BASE_KEYS: [&str; 6] = [
 /// Final child environment:
 /// - overlay (default): full current env, same-name keys overridden by profile;
 /// - clean: fixed base keys + profile variables, nothing else.
-fn build_env(
-    clean: bool,
-    vars: &EnvVars,
-) -> std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> {
-    use std::collections::BTreeMap;
-    use std::ffi::OsString;
-
+fn build_env(clean: bool, vars: &EnvVars) -> BTreeMap<OsString, OsString> {
     let mut env: BTreeMap<OsString, OsString> = BTreeMap::new();
     if clean {
         for k in CLEAN_BASE_KEYS {
@@ -987,7 +923,7 @@ fn dry_run_report(
     command: &[String],
     clean: bool,
     vars: &EnvVars,
-    env_map: &std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString>,
+    env_map: &BTreeMap<OsString, OsString>,
 ) -> Result<i32> {
     let quoted: Vec<String> = command.iter().map(|a| shell_quote(a)).collect();
     let mut out = String::new();
@@ -1088,7 +1024,10 @@ pub fn list() -> Result<()> {
     let profiles = profile::list()?;
     let mut out = String::new();
     if profiles.is_empty() {
-        out.push_str("No profiles yet. Create one with: envp import <name> --from <env-file>\n");
+        out.push_str(
+            "No profiles yet. Create one with: envp import <name> --from <file>\n\
+             or add variables directly:  envp set <name> KEY=VALUE\n",
+        );
         return write_stdout(out.as_bytes());
     }
     let _ = writeln!(out, "{:<20} {:>8}  Updated", "Name", "Vars");
@@ -1108,37 +1047,69 @@ pub fn list() -> Result<()> {
     write_stdout(out.as_bytes())
 }
 
-/// `envp rm <name>`
-pub fn rm(name: &str) -> Result<()> {
+/// `envp rm <name> [-f|--yes]`: delete after an interactive confirmation.
+/// `-f/--yes` skips the prompt — without it, a non-interactive stdin (CI,
+/// scripts) reads EOF and the answer is always "no" (review fix).
+pub fn rm(name: &str, yes: bool) -> Result<()> {
     profile::validate_name(name)?;
     if !profile::exists(name)? {
         bail!("profile '{name}' does not exist (see `envp list`)");
     }
-    eprint!("Delete profile '{name}'? [y/N] ");
-    std::io::stderr().flush()?;
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
-    let answer = answer.trim().to_ascii_lowercase();
-    if answer != "y" && answer != "yes" {
-        return out_line("Cancelled");
+    if !yes {
+        eprint!("Delete profile '{name}'? [y/N] ");
+        std::io::stderr().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        let answer = answer.trim().to_ascii_lowercase();
+        if answer != "y" && answer != "yes" {
+            return out_line("Cancelled");
+        }
     }
     profile::delete(name)?;
     out_line(format!("Profile '{name}' deleted"))
+}
+
+/// Shared guards for `cp`/`rename`: valid names, distinct, source present,
+/// destination free.
+fn check_transfer_args(src: &str, dst: &str) -> Result<()> {
+    profile::validate_name(src)?;
+    profile::validate_name(dst)?;
+    if src == dst {
+        bail!("source and destination are the same profile");
+    }
+    if !profile::exists(src)? {
+        bail!("profile '{src}' does not exist (see `envp list`)");
+    }
+    if profile::exists(dst)? {
+        bail!("profile '{dst}' already exists (see `envp list`)");
+    }
+    Ok(())
+}
+
+/// `envp cp <src> <dst>`: copy a profile under a new name. Profiles are
+/// self-contained files, so this is a controlled copy through the same
+/// atomic-write path as every other save — no decryption, password unchanged.
+pub fn cp(src: &str, dst: &str) -> Result<()> {
+    check_transfer_args(src, dst)?;
+    let blob = profile::read(src)?;
+    profile::write(dst, &blob)?;
+    out_line(format!("Profile '{src}' copied to '{dst}'"))
+}
+
+/// `envp rename <src> <dst>` (alias `mv`): rename in place. The cached
+/// keychain entry was keyed by the old name and is dropped.
+pub fn rename(src: &str, dst: &str) -> Result<()> {
+    check_transfer_args(src, dst)?;
+    profile::rename(src, dst)?;
+    let _ = keycache::clear(src);
+    out_line(format!("Profile '{src}' renamed to '{dst}'"))
 }
 
 /// `envp passwd <name>`: decrypt with the current password, re-encrypt with
 /// a new one (v1 format unchanged; fresh salt/nonce per write). A cached
 /// keychain entry for the old password becomes stale — remove it.
 pub fn passwd(name: &str, password_stdin: bool) -> Result<()> {
-    profile::validate_name(name)?;
-    let blob = profile::read(name)?;
-    let old = obtain_password(
-        name,
-        password_stdin,
-        &format!("Enter current password for profile '{name}': "),
-    )?;
-    let decrypted = crypto::decrypt(&blob, old.as_str())?;
-    let vars = EnvVars::from_json(&decrypted.plaintext)?;
+    let (vars, _) = open_profile(name, password_stdin)?;
 
     let new = new_password(password_stdin)?;
     let derived = crypto::DerivedKey::fresh(new.as_str())?;
@@ -1247,6 +1218,23 @@ mod tests {
         assert!(parse_key_list(",, ").is_empty());
     }
 
+    /// Giving both --only and --except would silently drop --except (none of
+    /// its keys can match the --only allowlist); rejected before any IO.
+    #[test]
+    fn only_and_except_are_mutually_exclusive() {
+        let err = import_command(
+            "test-profile",
+            None,
+            false,
+            Some("A".into()),
+            Some("B".into()),
+            false,
+            false,
+        )
+        .expect_err("both flags must be rejected");
+        assert!(err.to_string().contains("mutually exclusive"), "{err}");
+    }
+
     #[test]
     fn shell_quotes_unsafe_args() {
         assert_eq!(shell_quote("plain"), "plain");
@@ -1290,13 +1278,13 @@ mod tests {
     /// at `run` time (never panic inside `Command::env`).
     #[test]
     fn stored_keys_validated_defensively() {
-        let good = EnvVars::from_map(std::collections::BTreeMap::from([(
+        let good = EnvVars::from_map(BTreeMap::from([(
             "FOO".to_string(),
             "bar".to_string(),
         )]));
         assert!(validate_stored_keys(&good).is_ok());
 
-        let bad = EnvVars::from_map(std::collections::BTreeMap::from([
+        let bad = EnvVars::from_map(BTreeMap::from([
             ("FOO".to_string(), "bar".to_string()),
             ("BAD=KEY".to_string(), "x".to_string()),
         ]));
@@ -1331,7 +1319,7 @@ mod tests {
 
     #[test]
     fn invalid_keys_are_all_reported() {
-        let vars = EnvVars::from_map(std::collections::BTreeMap::from([
+        let vars = EnvVars::from_map(BTreeMap::from([
             ("GOOD".to_string(), "1".to_string()),
             ("BAD ONE".to_string(), "2".to_string()),
             ("2BAD".to_string(), "3".to_string()),

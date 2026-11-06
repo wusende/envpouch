@@ -131,12 +131,6 @@ fn derive_key(
     Ok(key)
 }
 
-/// Encrypt plaintext and serialize into complete profile file bytes,
-/// deriving the key from the password with a fresh random salt.
-pub fn encrypt(plaintext: &[u8], password: &str, meta: FileMeta) -> Result<Vec<u8>> {
-    encrypt_derived(plaintext, &DerivedKey::fresh(password)?, meta)
-}
-
 /// Encrypt with an already-derived key: the profile keeps its salt/params
 /// and gets a fresh random nonce.
 pub fn encrypt_derived(plaintext: &[u8], derived: &DerivedKey, meta: FileMeta) -> Result<Vec<u8>> {
@@ -264,6 +258,12 @@ pub fn read_meta(blob: &[u8]) -> Result<FileMeta> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Password-based encryption for tests: fresh key + `encrypt_derived`
+    /// (the removed public wrapper was exactly this composition).
+    fn encrypt(plaintext: &[u8], password: &str, meta: FileMeta) -> Result<Vec<u8>> {
+        encrypt_derived(plaintext, &DerivedKey::fresh(password)?, meta)
+    }
 
     fn sample_meta() -> FileMeta {
         FileMeta {

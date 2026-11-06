@@ -2,24 +2,25 @@
 //!
 //! ```text
 //! ""        => "(empty)"
-//! len <= 4  => "****"
-//! other     => "****" + last min(4, len/2) characters
+//! len < 8   => "****"
+//! other     => "****" + last 4 characters
 //! ```
 
 /// Mask a secret value for display. Operates on `char`s so multi-byte
-/// characters are counted and sliced correctly. At most 4 characters are
-/// revealed and never more than half the value — a fixed last-4 would give
-/// away 80% of a 5-character secret.
+/// characters are counted and sliced correctly.
+///
+/// The GitHub-style "last 4" convention assumes long secrets; on a 5-char
+/// value it would leak 80%. Values shorter than 8 characters reveal nothing,
+/// so the visible tail is never more than half of the secret.
 pub fn mask(v: &str) -> String {
     let count = v.chars().count();
     if count == 0 {
         return "(empty)".to_string();
     }
-    if count <= 4 {
+    if count < 8 {
         return "****".to_string();
     }
-    let reveal = 4.min(count / 2);
-    let tail: String = v.chars().skip(count - reveal).collect();
+    let tail: String = v.chars().skip(count - 4).collect();
     format!("****{tail}")
 }
 
@@ -32,18 +33,18 @@ mod tests {
         assert_eq!(mask(""), "(empty)");
         assert_eq!(mask("a"), "****");
         assert_eq!(mask("abcd"), "****");
-        // never reveal more than half the value
-        assert_eq!(mask("abcde"), "****de");
-        assert_eq!(mask("abcdef"), "****def");
-        assert_eq!(mask("abcdefgh"), "****efgh");
+        assert_eq!(mask("abcde"), "****");
+        assert_eq!(mask("1234567"), "****");
+        assert_eq!(mask("12345678"), "****5678");
         assert_eq!(mask("1"), "****"); // M0 acceptance: A=1 -> "A = ****"
         assert_eq!(mask("super-secret-value"), "****alue");
     }
 
     #[test]
     fn mask_multibyte() {
-        // 7 chars -> last 3 chars, no panics on char boundaries
-        assert_eq!(mask("中文值测试中文"), "****试中文");
-        assert_eq!(mask("ünïcodé"), "****odé");
+        // 7 chars -> fully masked; no panics on char boundaries either way
+        assert_eq!(mask("中文值测试中文"), "****");
+        assert_eq!(mask("ünïcodé"), "****");
+        assert_eq!(mask("中文值测试中文字"), "****试中文字");
     }
 }

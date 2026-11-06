@@ -9,7 +9,7 @@
 //! - `envp fpm-snippet <name>`                                     php-fpm pool env[...] lines
 //! - `envp diff <a> <b>`                                           compare two profiles (masked)
 //! - `envp run <name> [options] <command> [args...]`                run with the variables injected
-//! - `envp list / rm / passwd / unlock / lock`                     profile management
+//! - `envp list / rm / cp / rename / passwd / unlock / lock`        profile management
 //!
 //! Every decrypting command obtains the password via the global
 //! `--password-stdin` flag (one stdin line per prompt — scripts/CI), the OS
@@ -98,7 +98,8 @@ enum Commands {
         /// Profile name
         name: String,
     },
-    /// Add or replace variables (KEY=value; a bare KEY prompts with hidden input)
+    /// Add or replace variables (KEY=value; a bare KEY prompts with hidden input).
+    /// Creates the profile on first use (asks for a new password).
     Set {
         /// Profile name
         name: String,
@@ -157,6 +158,24 @@ enum Commands {
     Rm {
         /// Profile name
         name: String,
+        /// Delete without the confirmation prompt (scripts/CI)
+        #[arg(short = 'f', long = "yes")]
+        force: bool,
+    },
+    /// Copy a profile under a new name (same password)
+    Cp {
+        #[arg(value_name = "SRC")]
+        src: String,
+        #[arg(value_name = "DST")]
+        dst: String,
+    },
+    /// Rename a profile
+    #[command(visible_alias = "mv")]
+    Rename {
+        #[arg(value_name = "SRC")]
+        src: String,
+        #[arg(value_name = "DST")]
+        dst: String,
     },
     /// Change the password of a profile
     Passwd {
@@ -198,7 +217,9 @@ impl Commands {
             Commands::Diff { name_a, .. } => ("diff", Some(name_a.clone())),
             Commands::Run { name, .. } => ("run", Some(name.clone())),
             Commands::List => ("list", None),
-            Commands::Rm { name } => ("rm", Some(name.clone())),
+            Commands::Rm { name, .. } => ("rm", Some(name.clone())),
+            Commands::Cp { src, .. } => ("cp", Some(src.clone())),
+            Commands::Rename { src, .. } => ("rename", Some(src.clone())),
             Commands::Passwd { name } => ("passwd", Some(name.clone())),
             Commands::Unlock { name, .. } => ("unlock", Some(name.clone())),
             Commands::Lock { name } => ("lock", Some(name.clone())),
@@ -252,7 +273,9 @@ fn dispatch(password_stdin: bool, command: Commands) -> i32 {
             command,
         } => commands::run(&name, clean, dry_run, detach, password_stdin, &command),
         Commands::List => commands::list().map(|_| 0),
-        Commands::Rm { name } => commands::rm(&name).map(|_| 0),
+        Commands::Rm { name, force } => commands::rm(&name, force).map(|_| 0),
+        Commands::Cp { src, dst } => commands::cp(&src, &dst).map(|_| 0),
+        Commands::Rename { src, dst } => commands::rename(&src, &dst).map(|_| 0),
         Commands::Passwd { name } => commands::passwd(&name, password_stdin).map(|_| 0),
         Commands::Unlock { name, ttl } => commands::unlock(&name, ttl, password_stdin).map(|_| 0),
         Commands::Lock { name } => commands::lock(&name).map(|_| 0),

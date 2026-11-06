@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 pub struct EnvVars(BTreeMap<String, String>);
 
 impl EnvVars {
-    /// Construction helper (tests and `import --from-env`)
+    /// Construct from a raw map (production: `import --from-env`; tests)
     pub fn from_map(map: BTreeMap<String, String>) -> Self {
         Self(map)
     }
@@ -28,10 +28,9 @@ impl EnvVars {
         self.0.is_empty()
     }
 
-    /// Look up one variable's value.
-    #[allow(dead_code)] // small accessor for callers; exercised by tests
-    pub fn get(&self, key: &str) -> Option<&String> {
-        self.0.get(key)
+    /// Look up one variable's value (O(log n) on the sorted map).
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).map(String::as_str)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
@@ -216,13 +215,6 @@ mod tests {
     }
 
     #[test]
-    fn get_looks_up_by_key() {
-        let vars = EnvVars::from_map(BTreeMap::from([("A".to_string(), "1".to_string())]));
-        assert_eq!(vars.get("A").map(String::as_str), Some("1"));
-        assert!(vars.get("B").is_none());
-    }
-
-    #[test]
     fn merge_semantics() {
         let mut base = EnvVars::from_map(BTreeMap::from([
             ("A".to_string(), "1".to_string()),
@@ -255,6 +247,17 @@ mod tests {
         let json = vars.to_json().unwrap();
         let back = EnvVars::from_json(&json).unwrap();
         assert!(vars.iter().eq(back.iter()));
+    }
+
+    #[test]
+    fn get_looks_up_values() {
+        let vars = EnvVars::from_map(BTreeMap::from([
+            ("A".to_string(), "1".to_string()),
+            ("B".to_string(), "two".to_string()),
+        ]));
+        assert_eq!(vars.get("A"), Some("1"));
+        assert_eq!(vars.get("B"), Some("two"));
+        assert_eq!(vars.get("C"), None);
     }
 
     #[test]
