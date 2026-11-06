@@ -19,6 +19,7 @@ getrandom = "0.2"
 chrono = "0.4"
 libc = "0.2"
 keyring = { version = "3", features = ["apple-native", "sync-secret-service"] }
+clap_complete = "4"
 tempfile = "3"
 
 [dev-dependencies]

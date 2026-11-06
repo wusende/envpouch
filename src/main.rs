@@ -13,6 +13,7 @@
 //! Every decrypting command obtains the password via --password-stdin, the
 //! OS keychain cache (`unlock`), or the interactive prompt (spec §4.3).
 
+mod audit;
 mod commands;
 mod crypto;
 mod envfile;
@@ -28,7 +29,7 @@ mod signals;
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -148,6 +149,33 @@ enum Commands {
         /// Profile name
         name: String,
     },
+    /// Print shell completion script for the given shell (stdout)
+    Complete {
+        /// Target shell
+        #[arg(long, value_enum)]
+        shell: clap_complete::Shell,
+    },
+}
+
+impl Commands {
+    /// Audit metadata: (subcommand, profile name). Contains no secrets.
+    fn audit_info(&self) -> (&'static str, Option<String>) {
+        match self {
+            Commands::Import { name, .. } => ("import", Some(name.clone())),
+            Commands::Show { name, .. } => ("show", Some(name.clone())),
+            Commands::Export { name, .. } => ("export", Some(name.clone())),
+            Commands::Edit { name } => ("edit", Some(name.clone())),
+            Commands::FpmSnippet { name } => ("fpm-snippet", Some(name.clone())),
+            Commands::Diff { name_a, .. } => ("diff", Some(name_a.clone())),
+            Commands::Run { name, .. } => ("run", Some(name.clone())),
+            Commands::List => ("list", None),
+            Commands::Rm { name } => ("rm", Some(name.clone())),
+            Commands::Passwd { name } => ("passwd", Some(name.clone())),
+            Commands::Unlock { name, .. } => ("unlock", Some(name.clone())),
+            Commands::Lock { name } => ("lock", Some(name.clone())),
+            Commands::Complete { .. } => ("complete", None),
+        }
+    }
 }
 
 fn main() {
@@ -160,7 +188,9 @@ fn main() {
     #[cfg(unix)]
     {
         let cli = Cli::parse();
+        let (action, profile) = cli.command.audit_info();
         let code = dispatch(cli.command);
+        audit::record(action, profile.as_deref(), &format!("exit={code}"));
         if code != 0 {
             std::process::exit(code);
         }
@@ -197,6 +227,11 @@ fn dispatch(command: Commands) -> i32 {
         Commands::Passwd { name } => commands::passwd(&name).map(|_| 0),
         Commands::Unlock { name, ttl } => commands::unlock(&name, ttl).map(|_| 0),
         Commands::Lock { name } => commands::lock(&name).map(|_| 0),
+        Commands::Complete { shell } => {
+            let mut buf = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "envrun", &mut buf);
+            commands::write_stdout(&buf).map(|_| 0)
+        }
     };
     match result {
         Ok(code) => code,

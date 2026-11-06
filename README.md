@@ -48,6 +48,7 @@ envrun list               # first run prints how to create a profile
 | `envrun passwd <name>` | Change the profile password | yes |
 | `envrun unlock <name> [--ttl <seconds>]` | Verify + cache the password in the OS keychain (default TTL 900 s) | yes |
 | `envrun lock <name>` | Remove the cached keychain entry | no |
+| `envrun complete --shell <bash\|zsh\|fish\|...>` | Print shell completion script | no |
 
 ### Import
 
@@ -168,6 +169,46 @@ File format v1: `magic "ENVRUN" | version | salt(16B) | argon2 params |
 nonce(12B) | var_count | updated_at | AES-256-GCM ciphertext`. The variable
 count and update time are plaintext metadata so `envrun list` works without a
 password; everything else is ciphertext.
+
+## Operations
+
+**Storage location override** — for containers, service accounts, or
+multi-instance isolation, point envrun at a different base directory:
+
+```sh
+export ENVRUN_HOME=/var/lib/myapp/envrun   # profiles live in $ENVRUN_HOME/profiles
+```
+
+**Audit trail** (off by default) — set `ENVRUN_AUDIT=1` to append one line per
+decrypting invocation to `$ENVRUN_HOME/audit.log`:
+
+```sh
+export ENVRUN_AUDIT=1
+envrun run prod -- ./deploy.sh
+tail -1 "$HOME/.envrun/audit.log"    # 2026-11-06T09:12:00+0800	run	prod	exit=0
+```
+
+The audit log records timestamp, subcommand, profile name and exit code
+only — never variable keys or values. Writes are best-effort: a failed audit
+write warns on stderr but does not fail the command.
+
+**Shell completions**:
+
+```sh
+envrun complete --shell bash  > ~/.local/share/bash-completion/completions/envrun
+envrun complete --shell zsh   > "${fpath[1]}/_envrun"   # zsh
+envrun complete --shell fish  > ~/.config/fish/completions/envrun.fish
+```
+
+**Prebuilt binaries** — tagged releases (`v*`) publish static musl binaries
+(x86_64/aarch64 Linux) and a universal2 macOS build with SHA-256 checksums on
+the GitHub Releases page; `scripts/fuzz_cli.sh` and `cargo test` gate every
+CI run.
+
+**Backup / restore** — profile files are self-contained encrypted blobs;
+backing up the profiles directory with any file-level tool is sufficient.
+Keep profile passwords in a password manager: a lost password cannot be
+recovered from any backup (they are encrypted with the same password).
 
 ## Known limitations
 

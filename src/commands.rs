@@ -66,7 +66,7 @@ fn now_unix() -> Result<u64> {
 /// Write bytes to stdout. Rust ignores SIGPIPE, so a closed pipe (`envrun
 /// export dev | head`) surfaces as EPIPE here; treat it as a clean exit
 /// instead of panicking (review fix).
-fn out_bytes(bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_stdout(bytes: &[u8]) -> Result<()> {
     let mut out = std::io::stdout();
     match out.write_all(bytes).and_then(|()| out.flush()) {
         Ok(()) => Ok(()),
@@ -76,7 +76,7 @@ fn out_bytes(bytes: &[u8]) -> Result<()> {
 }
 
 fn out_line(s: impl std::fmt::Display) -> Result<()> {
-    out_bytes(format!("{s}\n").as_bytes())
+    write_stdout(format!("{s}\n").as_bytes())
 }
 
 /// Parse a comma-separated key list into trimmed, non-empty names.
@@ -224,7 +224,7 @@ fn import_vars(name: &str, new_vars: EnvVars, merge: bool, skipped: usize) -> Re
     for (k, _) in vars.iter() {
         let _ = writeln!(out, "{k}");
     }
-    out_bytes(out.as_bytes())?;
+    write_stdout(out.as_bytes())?;
 
     // Spec §5.1 pitfall: dotenvy expands $VAR in double-quoted/bare values
     if vars.iter().any(|(_, v)| v.contains('$')) {
@@ -249,13 +249,13 @@ pub fn show(name: &str, reveal: bool) -> Result<()> {
 
     if reveal {
         eprintln!("warning: output contains plaintext secrets");
-        out_bytes(vars.to_env_text().as_bytes())?;
+        write_stdout(vars.to_env_text().as_bytes())?;
     } else {
         let mut out = String::new();
         for (k, v) in vars.iter() {
             let _ = writeln!(out, "{k} = {}", mask::mask(v));
         }
-        out_bytes(out.as_bytes())?;
+        write_stdout(out.as_bytes())?;
     }
     Ok(())
 }
@@ -283,7 +283,7 @@ pub fn export(name: &str, output: Option<PathBuf>) -> Result<()> {
         }
         None => {
             eprintln!("warning: output contains plaintext secrets");
-            out_bytes(text.as_bytes())?;
+            write_stdout(text.as_bytes())?;
         }
     }
     Ok(())
@@ -398,7 +398,7 @@ pub fn fpm_snippet(name: &str) -> Result<()> {
         let _ = writeln!(out, "{}", fpm_line(k, v));
     }
     out.push_str("; If pool uses clear_env=yes (default), also add env[PATH] = ...\n");
-    out_bytes(out.as_bytes())?;
+    write_stdout(out.as_bytes())?;
 
     if !dollar_keys.is_empty() {
         eprintln!(
@@ -503,7 +503,7 @@ pub fn diff(name_a: &str, name_b: &str) -> Result<()> {
     } else {
         let _ = writeln!(out, "{same} variable(s) identical");
     }
-    out_bytes(out.as_bytes())
+    write_stdout(out.as_bytes())
 }
 
 /// `envrun run <name> [--clean] [--dry-run] [--detach] [--password-stdin] -- <cmd> [args...]`
@@ -737,7 +737,7 @@ fn dry_run_report(
         total,
         total as f64 / 1024.0
     );
-    out_bytes(out.as_bytes())?;
+    write_stdout(out.as_bytes())?;
     if total > 1_500_000 {
         eprintln!("warning: environment may exceed ARG_MAX (E2BIG)");
     }
@@ -784,7 +784,7 @@ pub fn list() -> Result<()> {
     let mut out = String::new();
     if profiles.is_empty() {
         out.push_str("No profiles yet. Create one with: envrun import <name> --from <env-file>\n");
-        return out_bytes(out.as_bytes());
+        return write_stdout(out.as_bytes());
     }
     let _ = writeln!(out, "{:<20} {:>8}  Updated", "Name", "Vars");
     for p in &profiles {
@@ -800,7 +800,7 @@ pub fn list() -> Result<()> {
         };
         let _ = writeln!(out, "{:<20} {:>8}  {}", p.name, vars_cell, updated_cell);
     }
-    out_bytes(out.as_bytes())
+    write_stdout(out.as_bytes())
 }
 
 /// `envrun rm <name>`

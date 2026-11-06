@@ -32,9 +32,22 @@ pub fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Base storage directory: `$ENVRUN_HOME` when set (ops: containers, service
+/// accounts, multi-instance isolation), otherwise `~/.envrun`.
+pub fn base_dir() -> Result<PathBuf> {
+    match std::env::var_os("ENVRUN_HOME") {
+        Some(h) if !h.is_empty() => Ok(PathBuf::from(h)),
+        _ => {
+            let home = dirs::home_dir().context(
+                "cannot determine home directory (set ENVRUN_HOME to an absolute path to override)",
+            )?;
+            Ok(home.join(".envrun"))
+        }
+    }
+}
+
 pub fn profiles_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("cannot determine home directory")?;
-    let dir = home.join(".envrun").join("profiles");
+    let dir = base_dir()?.join("profiles");
     fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create directory: {}", dir.display()))?;
     #[cfg(unix)]
