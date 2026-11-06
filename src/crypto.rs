@@ -10,11 +10,11 @@
 //! with any header field fails decryption. var_count / updated_at are plaintext
 //! metadata so `list` can display them without asking for a password.
 
-use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use anyhow::{Result, anyhow, bail};
 use argon2::{Algorithm, Argon2, Params, Version};
-use getrandom::getrandom;
+use getrandom::fill;
 use zeroize::Zeroizing;
 
 /// On-disk format v1 magic. Frozen now that the format is defined: changing it
@@ -75,7 +75,7 @@ impl DerivedKey {
         let params = KdfParams::default();
         validate_kdf_params(params.m_cost, params.t_cost, params.p_cost)?;
         let mut salt = [0u8; SALT_LEN];
-        getrandom(&mut salt).map_err(|e| anyhow!("failed to generate random salt: {e}"))?;
+        fill(&mut salt).map_err(|e| anyhow!("failed to generate random salt: {e}"))?;
         let key = derive_key(password, &salt, params)?;
         Ok(Self { key, salt, params })
     }
@@ -148,9 +148,11 @@ pub fn encrypt_derived(plaintext: &[u8], derived: &DerivedKey, meta: FileMeta) -
     header.extend_from_slice(&derived.params.t_cost.to_le_bytes());
     header.extend_from_slice(&derived.params.p_cost.to_le_bytes());
 
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&derived.key[..]));
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-    header.extend_from_slice(nonce.as_slice());
+    let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*derived.key));
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    fill(&mut nonce_bytes).map_err(|e| anyhow!("failed to generate random nonce: {e}"))?;
+    let nonce = Nonce::from(nonce_bytes);
+    header.extend_from_slice(&nonce[..]);
     header.extend_from_slice(&meta.var_count.to_le_bytes());
     header.extend_from_slice(&meta.updated_at.to_le_bytes());
     debug_assert_eq!(header.len(), HEADER_LEN);
@@ -217,10 +219,10 @@ pub fn decrypt_derived(blob: &[u8], password: &str) -> Result<(Decrypted, Derive
 
     let (header, ciphertext) = blob.split_at(HEADER_LEN);
     let key = derive_key(password, &salt, params)?;
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key[..]));
+    let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key));
     let plaintext = cipher
         .decrypt(
-            Nonce::from_slice(&nonce),
+            &Nonce::from(nonce),
             Payload {
                 msg: ciphertext,
                 aad: header,
