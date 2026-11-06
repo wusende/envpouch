@@ -37,10 +37,12 @@ envp show prod                            # variables, values masked
 envp run prod ./start-server.sh           # decrypt and run with them set
 ```
 
-Every command that decrypts gets the password one of three ways: the
+Every command that decrypts gets the password one of four ways: the
 interactive prompt (default), the OS keychain after `envp unlock prod`
-caches it for 15 minutes (`envp lock prod` drops it early), or
-`--password-stdin` reading it from stdin for scripts.
+caches it for 15 minutes (`envp lock prod` drops it early),
+`--password-stdin` reading it from stdin for scripts, or
+`--password-file <file>` reading one password per line from a 0600 file
+for services (see [systemd / supervisord](#systemd--supervisord)).
 
 **There is no password recovery.** A lost password means the profile is
 gone. Keep passwords in a password manager.
@@ -48,8 +50,10 @@ gone. Keep passwords in a password manager.
 ## Commands
 
 All commands except `list`, `rm`, `lock` and `complete` need the password.
-`--password-stdin` is a global flag and works with every one of them,
-before or after the subcommand.
+`--password-stdin` and `--password-file` are global flags and work with
+every one of them, before or after the subcommand (the two are mutually
+exclusive). With a file, one line is consumed per password prompt, in
+prompt order — same contract as stdin.
 
 | Command | What it does |
 |---|---|
@@ -77,6 +81,7 @@ envp run prod ./deploy.sh
 envp run prod --clean python app.py      # only a minimal base env plus profile vars
 envp run prod --dry-run ./deploy.sh      # print what would run, never values
 envp run prod --detach ./server.sh       # detach; envp exits immediately
+envp run prod --allow-core-dumps ./srv   # keep core dumps (LimitCORE= applies)
 ```
 
 - By default the child gets your full environment with the profile
@@ -88,18 +93,86 @@ envp run prod --detach ./server.sh       # detach; envp exits immediately
 - The child's exit code is passed through. `1` is an envp error such as a
   wrong password, `2` a usage error, `127` command not found.
 - On unix, Ctrl-C is forwarded to the child, same as `docker run`.
+- After the child starts, envp drops its in-memory copy of the decrypted
+  variables.
+- Core dumps are disabled for the child by default (leak-surface
+  reduction); `--allow-core-dumps` keeps the supervisor's limits instead
+  (systemd `LimitCORE=`, `ulimit -c`).
 
-## Scripts / CI
+## Scripts / CI / services
 
 ```sh
 printf '%s\n' "$PW" | envp run prod --password-stdin ./deploy.sh
 printf '%s\n' "$PW" | envp --password-stdin export prod -o /tmp/prod.env
+envp run prod --password-file /etc/myapp/envp.pass ./deploy.sh   # services
 ```
 
-One stdin line per password prompt, in prompt order: `passwd` reads the
-current password then the new one, `diff` reads one per profile. envp
-deliberately has no password environment variable, since process
-environments are readable by same-user processes.
+One stdin line — or one file line — per password prompt, in prompt
+order: `passwd` reads the current password then the new one, `diff`
+reads one per profile. envp deliberately has no password environment
+variable, since process environments are readable by same-user
+processes. `--password-file` refuses group/world-readable files (chmod
+600) so the file cannot silently become the weak link.
+
+## systemd / supervisord
+
+`envp run` can front a long-running service, but it is a
+password-bearing launcher: every start and every automatic restart needs
+the password, unattended. Use a `--password-file` for this — the keychain
+cache from `unlock` depends on a user session (D-Bus Secret Service on
+Linux) that system services do not have, and it expires.
+
+### systemd
+
+```ini
+[Service]
+User=myapp
+Environment=ENVPOUCH_HOME=/var/lib/myapp/envpouch
+ExecStart=/usr/local/bin/envp run prod --password-file /etc/myapp/envp.pass -- /usr/bin/myapp
+Restart=on-failure
+RestartSec=5
+# systemd signals the whole cgroup and envp forwards the signal too;
+# mixed delivers SIGTERM once via envp instead:
+KillMode=mixed
+# Type=notify services additionally need NotifyAccess=all — the MainPID
+# systemd sees is envp, not the application
+```
+
+`chmod 600 /etc/myapp/envp.pass`, owned by the service user; envp refuses
+group/world-readable password files.
+
+- Do not use `--clean` under systemd: it drops `NOTIFY_SOCKET`,
+  `WATCHDOG_USEC`, `JOURNAL_STREAM` and other systemd-provided variables.
+- Do not use `--detach` under any supervisor: envp exits immediately and
+  the service escapes the supervisor's tracking.
+- Every start pays one Argon2id derivation (tens to hundreds of
+  milliseconds). Give crash-looping services `RestartSec` and
+  `StartLimitBurst` headroom so KDF time does not eat the start budget.
+- After `systemctl stop`, systemd reports `code=exited, status=143` (envp
+  passes through 128+SIGTERM) rather than `code=killed` — adjust alert
+  rules that distinguish the two.
+- Core dumps are disabled for the child by default; add
+  `--allow-core-dumps` when systemd's `LimitCORE=` should apply.
+- If something kills envp itself with SIGKILL outside systemd's stop
+  logic, the child keeps running in its own process group. systemd's own
+  stop kills the whole cgroup, so this only matters for out-of-band
+  kills.
+
+For unattended daemon secrets, also weigh systemd's native
+`LoadCredential=` / `LoadCredentialEncrypted=`. envpouch's edge is the
+encrypted profile storage — backups and accidental commits stay inert —
+at the cost of one more long-lived wrapper process.
+
+### supervisord
+
+Prefer not to wrap services with envp under supervisord. The child runs
+in its own process group, out of reach of supervisord's group signals:
+when the application ignores SIGTERM and `stopwaitsecs` expires,
+supervisord SIGKILLs only envp (SIGKILL cannot be forwarded) and the
+application survives as an orphan — `killasgroup=true` does not help,
+because the child left envp's process group. A restart then fights the
+orphan for its port. If you must wrap, make sure the application exits
+promptly on SIGTERM, well within `stopwaitsecs`.
 
 ## php-fpm
 

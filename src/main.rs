@@ -11,9 +11,11 @@
 //! - `envp run <name> [options] <command> [args...]`                run with the variables injected
 //! - `envp list / rm / cp / rename / passwd / unlock / lock`        profile management
 //!
-//! Every decrypting command obtains the password via the global
-//! `--password-stdin` flag (one stdin line per prompt — scripts/CI), the OS
-//! keychain cache (`unlock`), or the interactive prompt (spec §4.3).
+//! Every decrypting command obtains the password via one of the global
+//! `--password-stdin` flag (one stdin line per prompt — scripts/CI),
+//! `--password-file <file>` (one file line per prompt — services; file must
+//! be mode 0600), the OS keychain cache (`unlock`), or the interactive
+//! prompt (spec §4.3).
 
 mod audit;
 mod commands;
@@ -51,6 +53,16 @@ struct Cli {
     /// instead of the interactive tty prompt — for scripts and CI
     #[arg(long, global = true)]
     password_stdin: bool,
+    /// Read one password per line from this file (in prompt order) instead
+    /// of the interactive tty prompt — for services; the file must be mode
+    /// 0600 on unix
+    #[arg(
+        long,
+        global = true,
+        value_name = "FILE",
+        conflicts_with = "password_stdin"
+    )]
+    password_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -142,6 +154,11 @@ enum Commands {
         /// Start the command detached in a new session; envp exits immediately
         #[arg(long)]
         detach: bool,
+        /// Keep core dumps enabled for the child (RLIMIT_CORE inherited from
+        /// the supervisor, e.g. systemd LimitCORE=); core dumps are disabled
+        /// by default
+        #[arg(long)]
+        allow_core_dumps: bool,
         /// Command and arguments to execute (everything after it is passed through;
         /// prefix with -- only if the command starts with an envp option)
         #[arg(
@@ -231,8 +248,9 @@ impl Commands {
 fn main() {
     let cli = Cli::parse();
     let password_stdin = cli.password_stdin;
+    let password_file = cli.password_file;
     let (action, profile) = cli.command.audit_info();
-    let code = dispatch(password_stdin, cli.command);
+    let code = dispatch(password_stdin, password_file, cli.command);
     audit::record(action, profile.as_deref(), &format!("exit={code}"));
     if code != 0 {
         std::process::exit(code);
@@ -241,7 +259,14 @@ fn main() {
 
 /// Exit codes (spec §3): 0 success, 1 envp error, 2 usage error (clap default).
 /// `run` forwards the child's exit code 1:1.
-fn dispatch(password_stdin: bool, command: Commands) -> i32 {
+fn dispatch(password_stdin: bool, password_file: Option<PathBuf>, command: Commands) -> i32 {
+    let mut input = match commands::PasswordInput::from_flags(password_stdin, password_file) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            return 1;
+        }
+    };
     let result = match command {
         Commands::Import {
             name,
@@ -250,34 +275,41 @@ fn dispatch(password_stdin: bool, command: Commands) -> i32 {
             only,
             except,
             merge,
-        } => commands::import_command(&name, from, from_env, only, except, merge, password_stdin)
+        } => commands::import_command(&name, from, from_env, only, except, merge, &mut input)
             .map(|_| 0),
-        Commands::Show { name, reveal } => commands::show(&name, reveal, password_stdin).map(|_| 0),
-        Commands::Export { name, output } => {
-            commands::export(&name, output, password_stdin).map(|_| 0)
-        }
-        Commands::Edit { name } => commands::edit(&name, password_stdin).map(|_| 0),
+        Commands::Show { name, reveal } => commands::show(&name, reveal, &mut input).map(|_| 0),
+        Commands::Export { name, output } => commands::export(&name, output, &mut input).map(|_| 0),
+        Commands::Edit { name } => commands::edit(&name, &mut input).map(|_| 0),
         Commands::Set { name, assignments } => {
-            commands::set(&name, &assignments, password_stdin).map(|_| 0)
+            commands::set(&name, &assignments, &mut input).map(|_| 0)
         }
-        Commands::Unset { name, keys } => commands::unset(&name, &keys, password_stdin).map(|_| 0),
-        Commands::FpmSnippet { name } => commands::fpm_snippet(&name, password_stdin).map(|_| 0),
+        Commands::Unset { name, keys } => commands::unset(&name, &keys, &mut input).map(|_| 0),
+        Commands::FpmSnippet { name } => commands::fpm_snippet(&name, &mut input).map(|_| 0),
         Commands::Diff { name_a, name_b } => {
-            commands::diff(&name_a, &name_b, password_stdin).map(|_| 0)
+            commands::diff(&name_a, &name_b, &mut input).map(|_| 0)
         }
         Commands::Run {
             name,
             clean,
             dry_run,
             detach,
+            allow_core_dumps,
             command,
-        } => commands::run(&name, clean, dry_run, detach, password_stdin, &command),
+        } => commands::run(
+            &name,
+            clean,
+            dry_run,
+            detach,
+            allow_core_dumps,
+            &mut input,
+            &command,
+        ),
         Commands::List => commands::list().map(|_| 0),
         Commands::Rm { name, force } => commands::rm(&name, force).map(|_| 0),
         Commands::Cp { src, dst } => commands::cp(&src, &dst).map(|_| 0),
         Commands::Rename { src, dst } => commands::rename(&src, &dst).map(|_| 0),
-        Commands::Passwd { name } => commands::passwd(&name, password_stdin).map(|_| 0),
-        Commands::Unlock { name, ttl } => commands::unlock(&name, ttl, password_stdin).map(|_| 0),
+        Commands::Passwd { name } => commands::passwd(&name, &mut input).map(|_| 0),
+        Commands::Unlock { name, ttl } => commands::unlock(&name, ttl, &mut input).map(|_| 0),
         Commands::Lock { name } => commands::lock(&name).map(|_| 0),
         Commands::Complete { shell } => {
             let mut buf = Vec::new();

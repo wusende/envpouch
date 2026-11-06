@@ -26,12 +26,158 @@ fn prompt_password(prompt: &str) -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(pw))
 }
 
-/// Unified password acquisition (spec §4.3): --password-stdin first, then the
-/// OS keychain cache, then the interactive prompt. Every decrypting command
-/// goes through this so `unlock` benefits all of them.
-fn obtain_password(name: &str, password_stdin: bool, prompt: &str) -> Result<Zeroizing<String>> {
-    if password_stdin {
-        return read_password_stdin();
+/// Debug impl never prints the password lines, to avoid leaking secrets
+/// to logs and test-failure output.
+impl std::fmt::Debug for PasswordInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasswordInput")
+            .field("stdin", &self.stdin)
+            .field("file", &self.file)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Password input configured by the global flags (spec §4.3):
+/// `--password-stdin` (one stdin line per prompt), `--password-file`
+/// (one file line per prompt, file must be mode 0600 on unix), or the
+/// default keychain → interactive prompt. Explicit flags take precedence
+/// over the keychain, so a service with a password file never probes
+/// D-Bus on its start path.
+pub(crate) struct PasswordInput {
+    stdin: bool,
+    file: Option<PathBuf>,
+    /// Password-file lines, loaded on first use: commands that decrypt
+    /// nothing (`list`, `rm`, `lock`) never touch the file.
+    lines: Option<Zeroizing<Vec<String>>>,
+    cursor: usize,
+}
+
+impl PasswordInput {
+    /// Build from the parsed global flags. Mutually exclusive at the CLI
+    /// level (clap `conflicts_with`); re-checked here for defense in depth.
+    pub(crate) fn from_flags(stdin: bool, file: Option<PathBuf>) -> Result<Self> {
+        match (stdin, file) {
+            (true, Some(_)) => {
+                bail!("--password-stdin and --password-file are mutually exclusive")
+            }
+            (true, None) => Ok(Self {
+                stdin: true,
+                file: None,
+                lines: None,
+                cursor: 0,
+            }),
+            (false, Some(file)) => Ok(Self {
+                stdin: false,
+                file: Some(file),
+                lines: None,
+                cursor: 0,
+            }),
+            (false, None) => Ok(Self {
+                stdin: false,
+                file: None,
+                lines: None,
+                cursor: 0,
+            }),
+        }
+    }
+
+    /// True when the password comes from a flag (stdin or file) instead of
+    /// the keychain/prompt path.
+    fn is_explicit(&self) -> bool {
+        self.stdin || self.file.is_some()
+    }
+
+    /// True when stdin is reserved for password lines (--password-stdin);
+    /// interactive value prompts must not read it.
+    fn reserves_stdin(&self) -> bool {
+        self.stdin
+    }
+
+    /// Consume the next password from the explicit source: one line per
+    /// prompt, in prompt order (same contract as --password-stdin, so
+    /// multi-prompt commands like `passwd` and `diff` work with files too).
+    fn next_password(&mut self) -> Result<Zeroizing<String>> {
+        if self.stdin {
+            return read_password_stdin();
+        }
+        let Some(path) = self.file.clone() else {
+            bail!("no explicit password source configured"); // unreachable via the CLI
+        };
+        if self.lines.is_none() {
+            self.lines = Some(read_password_file(&path)?);
+        }
+        let line = {
+            let lines = self.lines.as_ref().expect("loaded just above");
+            let Some(line) = lines.get(self.cursor) else {
+                bail!(
+                    "password file {} has fewer lines than password prompts",
+                    path.display()
+                );
+            };
+            line.to_string()
+        };
+        self.cursor += 1;
+        let pw = Zeroizing::new(line);
+        if pw.as_str().is_empty() {
+            bail!("empty line in password file {}", path.display());
+        }
+        Ok(pw)
+    }
+}
+
+/// Upper bound for a whole password file: far beyond any sane multi-prompt
+/// use (each single password is capped by MAX_PASSWORD_BYTES).
+const MAX_PASSWORD_FILE_BYTES: usize = 64 * 1024;
+
+/// Read the `--password-file` lines. The file must exist, be valid UTF-8,
+/// and on unix be mode 0600 — a group/world-readable password file defeats
+/// the feature's whole point, so it is refused instead of warned about.
+fn read_password_file(path: &Path) -> Result<Zeroizing<Vec<String>>> {
+    if !path.exists() {
+        bail!("password file not found: {}", path.display());
+    }
+    let meta = std::fs::metadata(path)
+        .with_context(|| format!("failed to stat password file: {}", path.display()))?;
+    if meta.len() > MAX_PASSWORD_FILE_BYTES as u64 {
+        bail!("password file too large (max {MAX_PASSWORD_FILE_BYTES} bytes)");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            bail!(
+                "password file {} is mode {:o}; must be owner-only (chmod 600 {})",
+                path.display(),
+                mode,
+                path.display()
+            );
+        }
+    }
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read password file: {}", path.display()))?;
+    let trimmed = raw.trim_end_matches(['\n', '\r']);
+    if trimmed.is_empty() {
+        bail!("password file {} is empty", path.display());
+    }
+    let lines: Vec<String> = trimmed
+        .split('\n')
+        .map(|l| l.trim_end_matches('\r').to_string())
+        .collect();
+    Ok(Zeroizing::new(lines))
+}
+
+/// Unified password acquisition (spec §4.3): the explicit flag source
+/// (--password-stdin / --password-file) first, then the OS keychain cache,
+/// then the interactive prompt. Every decrypting command goes through this
+/// so `unlock` benefits all of them.
+fn obtain_password(
+    name: &str,
+    input: &mut PasswordInput,
+    prompt: &str,
+) -> Result<Zeroizing<String>> {
+    if input.is_explicit() {
+        return input.next_password();
     }
     if let Some(pw) = keycache::lookup(name) {
         return Ok(pw);
@@ -39,14 +185,14 @@ fn obtain_password(name: &str, password_stdin: bool, prompt: &str) -> Result<Zer
     prompt_password(prompt)
 }
 
-/// Open an existing profile: read it, acquire the password (stdin → keychain
-/// → prompt), decrypt, parse. The derived key is returned so callers that
-/// re-save can skip a second KDF pass. Shared by every decrypting command.
-fn open_profile(name: &str, password_stdin: bool) -> Result<(EnvVars, crypto::DerivedKey)> {
+/// Open an existing profile: read it, acquire the password (flag source →
+/// keychain → prompt), decrypt, parse. The derived key is returned so callers
+/// that re-save can skip a second KDF pass. Shared by every decrypting command.
+fn open_profile(name: &str, input: &mut PasswordInput) -> Result<(EnvVars, crypto::DerivedKey)> {
     let blob = profile::read(name)?;
     let password = obtain_password(
         name,
-        password_stdin,
+        input,
         &format!("Enter password for profile '{name}': "),
     )?;
     let (decrypted, derived) = crypto::decrypt_derived(&blob, password.as_str())?;
@@ -55,12 +201,13 @@ fn open_profile(name: &str, password_stdin: bool) -> Result<(EnvVars, crypto::De
 }
 
 /// New-password setup. Interactive: type twice to confirm with one retry on
-/// mismatch (spec §5.1). With --password-stdin: one line, no confirmation
-/// (scripts cannot re-type; the lost-password warning still prints).
-fn new_password(password_stdin: bool) -> Result<Zeroizing<String>> {
+/// mismatch (spec §5.1). With an explicit flag source: one line, no
+/// confirmation (scripts cannot re-type; the lost-password warning still
+/// prints).
+fn new_password(input: &mut PasswordInput) -> Result<Zeroizing<String>> {
     eprintln!("warning: if you lose this password, the profile cannot be recovered");
-    if password_stdin {
-        let pw = read_password_stdin()?;
+    if input.is_explicit() {
+        let pw = input.next_password()?;
         if pw.as_str().len() < 8 {
             bail!("password too short (minimum 8 characters)");
         }
@@ -128,26 +275,26 @@ pub fn import_command(
     only: Option<String>,
     except: Option<String>,
     merge: bool,
-    password_stdin: bool,
+    input: &mut PasswordInput,
 ) -> Result<()> {
     if only.is_some() && except.is_some() {
         bail!("--only and --except are mutually exclusive");
     }
     match (from, from_env) {
-        (Some(f), false) => import_from_file(name, &f, merge, password_stdin),
-        (None, true) => import_from_env(name, only, except, merge, password_stdin),
+        (Some(f), false) => import_from_file(name, &f, merge, input),
+        (None, true) => import_from_env(name, only, except, merge, input),
         (Some(_), true) => bail!("--from and --from-env are mutually exclusive"),
         (None, false) => bail!("nothing to import: specify --from <file> or --from-env"),
     }
 }
 
-fn import_from_file(name: &str, from: &Path, merge: bool, password_stdin: bool) -> Result<()> {
+fn import_from_file(name: &str, from: &Path, merge: bool, input: &mut PasswordInput) -> Result<()> {
     if !from.exists() {
         bail!("file not found: {}", from.display());
     }
     let new_vars = EnvVars::parse_file(from)?;
     require_valid_keys(&new_vars)?;
-    import_vars(name, new_vars, merge, "", password_stdin)
+    import_vars(name, new_vars, merge, "", input)
 }
 
 /// `import --from-env`: grab variables from the current process environment.
@@ -158,7 +305,7 @@ fn import_from_env(
     only: Option<String>,
     except: Option<String>,
     merge: bool,
-    password_stdin: bool,
+    input: &mut PasswordInput,
 ) -> Result<()> {
     let only_list = only.as_ref().map(|s| parse_key_list(s));
     let except_list = except.as_ref().map(|s| parse_key_list(s));
@@ -191,7 +338,7 @@ fn import_from_env(
     let vars = EnvVars::from_map(map);
     require_valid_keys(&vars)?;
     let note = format_skipped_note(only.is_some(), skipped_filtered, skipped_non_utf8);
-    import_vars(name, vars, merge, &note, password_stdin)
+    import_vars(name, vars, merge, &note, input)
 }
 
 /// Parenthesized suffix for the import summary line: names why variables
@@ -327,15 +474,15 @@ fn resolve_prompted(parsed: Vec<Assignment>) -> Result<Vec<(String, String)>> {
 /// password), so a profile can be built from scratch without an .env file.
 /// `KEY=VALUE` exposes the value to `ps`/shell history — use the bare form
 /// for secrets.
-pub fn set(name: &str, assignments: &[String], password_stdin: bool) -> Result<()> {
+pub fn set(name: &str, assignments: &[String], input: &mut PasswordInput) -> Result<()> {
     profile::validate_name(name)?;
-    let parsed = parse_assignments(assignments, password_stdin)?;
+    let parsed = parse_assignments(assignments, input.reserves_stdin())?;
 
     let existed = profile::exists(name)?;
     let (mut vars, derived) = if existed {
-        open_profile(name, password_stdin)?
+        open_profile(name, input)?
     } else {
-        let password = new_password(password_stdin)?;
+        let password = new_password(input)?;
         (
             EnvVars::default(),
             crypto::DerivedKey::fresh(password.as_str())?,
@@ -363,7 +510,7 @@ pub fn set(name: &str, assignments: &[String], password_stdin: bool) -> Result<(
 
 /// `envp unset <name> KEY...`: remove variables; missing keys are reported but
 /// do not fail the command unless nothing at all matched.
-pub fn unset(name: &str, keys: &[String], password_stdin: bool) -> Result<()> {
+pub fn unset(name: &str, keys: &[String], input: &mut PasswordInput) -> Result<()> {
     profile::validate_name(name)?;
     if !profile::exists(name)? {
         bail!("profile '{name}' does not exist (create it with `envp set` or `envp import`)");
@@ -372,7 +519,7 @@ pub fn unset(name: &str, keys: &[String], password_stdin: bool) -> Result<()> {
         envfile::validate_key(key, "")?;
     }
 
-    let (mut vars, derived) = open_profile(name, password_stdin)?;
+    let (mut vars, derived) = open_profile(name, input)?;
 
     let mut removed = 0usize;
     let mut missing = Vec::new();
@@ -409,7 +556,7 @@ fn import_vars(
     new_vars: EnvVars,
     merge: bool,
     skipped_note: &str,
-    password_stdin: bool,
+    input: &mut PasswordInput,
 ) -> Result<()> {
     let existed = profile::exists(name)?;
     if existed && !merge {
@@ -417,13 +564,13 @@ fn import_vars(
     }
     let (vars, derived) = if existed {
         // Merging must verify the existing password; it stays unchanged
-        let (existing, derived) = open_profile(name, password_stdin)?;
+        let (existing, derived) = open_profile(name, input)?;
         let mut merged = existing;
         let (added, updated) = merged.merge(new_vars);
         eprintln!("Merge result: {added} added, {updated} updated");
         (merged, derived)
     } else {
-        let password = new_password(password_stdin)?;
+        let password = new_password(input)?;
         (new_vars, crypto::DerivedKey::fresh(password.as_str())?)
     };
 
@@ -454,8 +601,8 @@ fn import_vars(
 }
 
 /// `envp show <name> [--reveal]`
-pub fn show(name: &str, reveal: bool, password_stdin: bool) -> Result<()> {
-    let (vars, _) = open_profile(name, password_stdin)?;
+pub fn show(name: &str, reveal: bool, input: &mut PasswordInput) -> Result<()> {
+    let (vars, _) = open_profile(name, input)?;
 
     if reveal {
         eprintln!("warning: output contains plaintext secrets");
@@ -471,8 +618,8 @@ pub fn show(name: &str, reveal: bool, password_stdin: bool) -> Result<()> {
 }
 
 /// `envp export <name> [-o <file>]`
-pub fn export(name: &str, output: Option<PathBuf>, password_stdin: bool) -> Result<()> {
-    let (vars, _) = open_profile(name, password_stdin)?;
+pub fn export(name: &str, output: Option<PathBuf>, input: &mut PasswordInput) -> Result<()> {
+    let (vars, _) = open_profile(name, input)?;
     let text = vars.to_env_text();
 
     match output {
@@ -493,9 +640,9 @@ pub fn export(name: &str, output: Option<PathBuf>, password_stdin: bool) -> Resu
 
 /// `envp edit <name>` (spec §5.3): decrypt into a 0600 temp file, open
 /// $EDITOR (default vi), parse back, re-encrypt atomically.
-pub fn edit(name: &str, password_stdin: bool) -> Result<()> {
+pub fn edit(name: &str, input: &mut PasswordInput) -> Result<()> {
     cleanup_edit_leftovers();
-    let (vars, key) = open_profile(name, password_stdin)?;
+    let (vars, key) = open_profile(name, input)?;
 
     let editor = split_editor(std::env::var("EDITOR").ok().as_deref());
     let tmp = tempfile::Builder::new()
@@ -597,8 +744,8 @@ fn cleanup_edit_leftovers_in(dir: &Path, stale_after: std::time::Duration) {
 
 /// `envp fpm-snippet <name>` (spec §4.7): emit php-fpm pool `env[...]`
 /// lines on stdout.
-pub fn fpm_snippet(name: &str, password_stdin: bool) -> Result<()> {
-    let (vars, _) = open_profile(name, password_stdin)?;
+pub fn fpm_snippet(name: &str, input: &mut PasswordInput) -> Result<()> {
+    let (vars, _) = open_profile(name, input)?;
 
     eprintln!("warning: output contains plaintext secrets - do not paste into logs or commit it");
     let mut out = String::new();
@@ -648,12 +795,12 @@ pub(crate) fn fpm_line(key: &str, value: &str) -> String {
 
 /// `envp diff <a> <b>` (spec §9 M4): show key-level differences with
 /// masked values.
-pub fn diff(name_a: &str, name_b: &str, password_stdin: bool) -> Result<()> {
+pub fn diff(name_a: &str, name_b: &str, input: &mut PasswordInput) -> Result<()> {
     if name_a == name_b {
         bail!("cannot diff a profile with itself");
     }
-    let (vars_a, _) = open_profile(name_a, password_stdin)?;
-    let (vars_b, _) = open_profile(name_b, password_stdin)?;
+    let (vars_a, _) = open_profile(name_a, input)?;
+    let (vars_b, _) = open_profile(name_b, input)?;
 
     // Key matching goes through EnvVars::get (O(log n) lookups), not linear
     // rescans of the other map — the old nested iteration was O(n²).
@@ -710,9 +857,9 @@ pub fn diff(name_a: &str, name_b: &str, password_stdin: bool) -> Result<()> {
     write_stdout(out.as_bytes())
 }
 
-/// `envp run <name> [--clean] [--dry-run] [--detach] <cmd> [args...]`
-/// (`--password-stdin` is a global flag, usable with this and every other
-/// password-requiring command)
+/// `envp run <name> [--clean] [--dry-run] [--detach] [--allow-core-dumps]
+/// <cmd> [args...]` (`--password-stdin` / `--password-file` are global flags,
+/// usable with this and every other password-requiring command)
 ///
 /// Returns the child exit code (spec §3): child exit code 1:1, 127 not found,
 /// 126 no execute permission, 128+N killed by signal N, 1 for envp errors.
@@ -721,20 +868,28 @@ pub fn diff(name_a: &str, name_b: &str, password_stdin: bool) -> Result<()> {
 /// process group (`process_group(0)`), envp catches terminal signals and
 /// forwards them — the same model as `timeout`/`docker run`. No `sh -c`
 /// wrapping: the target program is exec'd directly.
+///
+/// Secrets hygiene: once the merged environment has been copied into the
+/// child's `Command`, the plaintext profile vars and env map are dropped, so
+/// a long-running service does not keep them in envp's heap for its whole
+/// lifetime (review finding). Core dumps stay disabled by default; pass
+/// `allow_core_dumps` to keep the supervisor's limits (systemd
+/// `LimitCORE=`, `ulimit -c`).
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     name: &str,
     clean: bool,
     dry_run: bool,
     detach: bool,
-    password_stdin: bool,
+    allow_core_dumps: bool,
+    input: &mut PasswordInput,
     command: &[String],
 ) -> Result<i32> {
     profile::validate_name(name)?;
     if command.is_empty() {
         bail!("missing command to execute");
     }
-    let (vars, _) = open_profile(name, password_stdin)?;
+    let (vars, _) = open_profile(name, input)?;
     // Stored data is trusted per spec §4.4 (validated at import/edit time),
     // but a hand-crafted payload must still fail cleanly here instead of
     // panicking inside `Command::env` (keys containing '=' or NUL).
@@ -754,6 +909,10 @@ pub fn run(
     for (k, v) in &env_map {
         cmd.env(k, v);
     }
+    // The child env was copied into `cmd`; release the plaintext maps now so
+    // they do not sit in envp's memory for the whole service lifetime.
+    drop(env_map);
+    drop(vars);
 
     #[cfg(unix)]
     {
@@ -762,19 +921,22 @@ pub fn run(
         // are forwarded explicitly (spec §4.1-§4.2).
         cmd.process_group(0);
         // Best-effort: disable core dumps for the child to shrink the leak
-        // surface (spec §1, §4.6). setrlimit is async-signal-safe, allowed
-        // inside pre_exec; ignore failures (rare, e.g. hard resource limit).
-        unsafe {
-            cmd.pre_exec(|| {
-                // setrlimit takes a struct pointer on every unix (libc maps it
-                // to the same signature on Linux and BSD/macOS).
-                let lim = libc::rlimit {
-                    rlim_cur: 0,
-                    rlim_max: 0,
-                };
-                libc::setrlimit(libc::RLIMIT_CORE, &lim);
-                Ok(())
-            });
+        // surface (spec §1, §4.6), unless the operator opted out to keep the
+        // supervisor's core-dump policy. setrlimit is async-signal-safe,
+        // allowed inside pre_exec; ignore failures (rare, e.g. hard limit).
+        if !allow_core_dumps {
+            unsafe {
+                cmd.pre_exec(|| {
+                    // setrlimit takes a struct pointer on every unix (libc maps it
+                    // to the same signature on Linux and BSD/macOS).
+                    let lim = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    libc::setrlimit(libc::RLIMIT_CORE, &lim);
+                    Ok(())
+                });
+            }
         }
         if detach {
             // Spec §4.5 (P2): nohup-style detachment — new session, envp
@@ -816,6 +978,9 @@ pub fn run(
             return Err(e).with_context(|| format!("failed to spawn: {}", command[0]));
         }
     };
+    // The child has its own copy of the environment now; dropping `cmd`
+    // releases the parent-side copy std keeps inside the Command.
+    drop(cmd);
 
     if detach {
         let pid = child.id();
@@ -1108,10 +1273,10 @@ pub fn rename(src: &str, dst: &str) -> Result<()> {
 /// `envp passwd <name>`: decrypt with the current password, re-encrypt with
 /// a new one (v1 format unchanged; fresh salt/nonce per write). A cached
 /// keychain entry for the old password becomes stale — remove it.
-pub fn passwd(name: &str, password_stdin: bool) -> Result<()> {
-    let (vars, _) = open_profile(name, password_stdin)?;
+pub fn passwd(name: &str, input: &mut PasswordInput) -> Result<()> {
+    let (vars, _) = open_profile(name, input)?;
 
-    let new = new_password(password_stdin)?;
+    let new = new_password(input)?;
     let derived = crypto::DerivedKey::fresh(new.as_str())?;
     save_profile(name, &vars, &derived)?;
     let _ = keycache::clear(name);
@@ -1121,7 +1286,7 @@ pub fn passwd(name: &str, password_stdin: bool) -> Result<()> {
 /// `envp unlock <name> [--ttl <seconds>]` (spec §4.3): verify the password,
 /// then cache it in the OS keychain. On keychain failure, degrade to a
 /// warning instead of hard-failing (SSH sessions without GUI access).
-pub fn unlock(name: &str, ttl: u64, password_stdin: bool) -> Result<()> {
+pub fn unlock(name: &str, ttl: u64, input: &mut PasswordInput) -> Result<()> {
     profile::validate_name(name)?;
     // Usage errors fail fast (§0.5) — they are not keychain unavailability
     // and must not be swallowed by the degrade path below.
@@ -1133,8 +1298,8 @@ pub fn unlock(name: &str, ttl: u64, password_stdin: bool) -> Result<()> {
     }
     let blob = profile::read(name)?;
     // unlock verifies the real password: never the keychain cache itself
-    let password = if password_stdin {
-        read_password_stdin()?
+    let password = if input.is_explicit() {
+        input.next_password()?
     } else {
         prompt_password(&format!("Enter password for profile '{name}': "))?
     };
@@ -1222,6 +1387,7 @@ mod tests {
     /// its keys can match the --only allowlist); rejected before any IO.
     #[test]
     fn only_and_except_are_mutually_exclusive() {
+        let mut input = PasswordInput::from_flags(false, None).unwrap();
         let err = import_command(
             "test-profile",
             None,
@@ -1229,7 +1395,7 @@ mod tests {
             Some("A".into()),
             Some("B".into()),
             false,
-            false,
+            &mut input,
         )
         .expect_err("both flags must be rejected");
         assert!(err.to_string().contains("mutually exclusive"), "{err}");
@@ -1278,10 +1444,7 @@ mod tests {
     /// at `run` time (never panic inside `Command::env`).
     #[test]
     fn stored_keys_validated_defensively() {
-        let good = EnvVars::from_map(BTreeMap::from([(
-            "FOO".to_string(),
-            "bar".to_string(),
-        )]));
+        let good = EnvVars::from_map(BTreeMap::from([("FOO".to_string(), "bar".to_string())]));
         assert!(validate_stored_keys(&good).is_ok());
 
         let bad = EnvVars::from_map(BTreeMap::from([
@@ -1334,5 +1497,103 @@ mod tests {
             "each invalid key must be listed: {err}"
         );
         assert!(err.contains("2 invalid variable(s)"));
+    }
+
+    /// --password-file serves one line per prompt, in prompt order, and
+    /// fails cleanly when the file runs out of lines (same contract as
+    /// --password-stdin).
+    #[test]
+    fn password_file_serves_one_line_per_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("pw");
+        std::fs::write(&p, "first-pw\nsecond-pw").unwrap(); // no trailing newline
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mut input = PasswordInput::from_flags(false, Some(p)).unwrap();
+        assert!(input.is_explicit());
+        assert_eq!(input.next_password().unwrap().as_str(), "first-pw");
+        assert_eq!(input.next_password().unwrap().as_str(), "second-pw");
+        let err = input.next_password().unwrap_err().to_string();
+        assert!(err.contains("fewer lines"), "{err}");
+    }
+
+    #[test]
+    fn password_flags_are_mutually_exclusive() {
+        let err = PasswordInput::from_flags(true, Some(PathBuf::from("/x")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mutually exclusive"), "{err}");
+        // stdin mode still works and reserves stdin
+        let input = PasswordInput::from_flags(true, None).unwrap();
+        assert!(input.is_explicit());
+        assert!(input.reserves_stdin());
+        // plain interactive mode touches neither
+        let input = PasswordInput::from_flags(false, None).unwrap();
+        assert!(!input.is_explicit());
+        assert!(!input.reserves_stdin());
+    }
+
+    /// A missing password file fails only when a password is actually
+    /// needed (lazy load: `list`-style commands never read the file).
+    #[test]
+    fn password_file_missing_fails_only_on_use() {
+        let mut input =
+            PasswordInput::from_flags(false, Some(PathBuf::from("/nonexistent/envp/pass")))
+                .unwrap();
+        let err = input.next_password().unwrap_err().to_string();
+        assert!(err.contains("not found"), "{err}");
+    }
+
+    /// CRLF line endings and blank lines: CRLF is accepted per line, a blank
+    /// line in the middle is a hard error (an empty password is never right).
+    #[test]
+    fn password_file_crlf_and_blank_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("pw");
+        std::fs::write(&p, "first\r\n\r\nsecond\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mut input = PasswordInput::from_flags(false, Some(p)).unwrap();
+        assert_eq!(input.next_password().unwrap().as_str(), "first");
+        let err = input.next_password().unwrap_err().to_string();
+        assert!(err.contains("empty line"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn password_file_rejects_loose_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("pw");
+        std::fs::write(&p, "secret-pw\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut input = PasswordInput::from_flags(false, Some(p.clone())).unwrap();
+        let err = input.next_password().unwrap_err().to_string();
+        assert!(err.contains("chmod 600"), "{err}");
+
+        // tighten and retry: same input object recovers on the next prompt
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(input.next_password().unwrap().as_str(), "secret-pw");
+    }
+
+    #[test]
+    fn password_file_rejects_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("pw");
+        std::fs::write(&p, "\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mut input = PasswordInput::from_flags(false, Some(p)).unwrap();
+        let err = input.next_password().unwrap_err().to_string();
+        assert!(err.contains("is empty"), "{err}");
     }
 }
