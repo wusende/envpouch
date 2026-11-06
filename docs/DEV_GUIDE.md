@@ -13,7 +13,7 @@
 3. **明文 secret 的传播面最小化**：解密后的 JSON 已是 `Zeroizing<Vec<u8>>`；新代码中密码用 `Zeroizing<String>` 接住；凡是打印 key 列表/预览的地方一律走 §6 的 mask 规则。
 4. **stdout 只放数据，stderr 只放诊断**：`export`/`fpm-snippet` 的输出要能进管道；错误、警告、提示全部 stderr。
 5. **fail fast**：profile 已存在、key 非法、必填参数缺失 → 直接报错退出，不做猜测性默认。
-6. v1 **只支持 macOS/Linux**（unix）。Windows 下 `envrun` 任何子命令直接报错 `error: Windows is not supported` 并退出（exit 2）。
+6. 平台支持（v1.1 修订，原 §0.6 "仅 unix" 已过时）：macOS/Linux/Windows 三平台。Unix 路径保持 §4.1-§4.2 的进程组+信号转发模型与 RLIMIT_CORE 加固；Windows 路径由控制台组原生传递 Ctrl-C，无信号转发层、无 128+N 退出码、无 core-dump 加固（差异已写入 README Known limitations）。行为分歧只能随平台 cfg 分叉，不得引入运行时探测。
 
 ## 1. 项目定位
 

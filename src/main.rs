@@ -20,7 +20,6 @@ mod envfile;
 mod exclude;
 #[cfg(test)]
 mod fuzz_tests;
-#[cfg(unix)]
 mod keycache;
 mod mask;
 mod profile;
@@ -179,21 +178,12 @@ impl Commands {
 }
 
 fn main() {
-    // Spec §0.6: v1 only supports macOS/Linux
-    #[cfg(not(unix))]
-    {
-        eprintln!("error: Windows is not supported");
-        std::process::exit(2);
-    }
-    #[cfg(unix)]
-    {
-        let cli = Cli::parse();
-        let (action, profile) = cli.command.audit_info();
-        let code = dispatch(cli.command);
-        audit::record(action, profile.as_deref(), &format!("exit={code}"));
-        if code != 0 {
-            std::process::exit(code);
-        }
+    let cli = Cli::parse();
+    let (action, profile) = cli.command.audit_info();
+    let code = dispatch(cli.command);
+    audit::record(action, profile.as_deref(), &format!("exit={code}"));
+    if code != 0 {
+        std::process::exit(code);
     }
 }
 

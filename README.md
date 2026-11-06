@@ -1,6 +1,7 @@
 # envrun
 
-Encrypted environment-variable profile manager for macOS/Linux.
+Encrypted environment-variable profile manager for macOS, Linux, and
+Windows.
 
 Store `.env` files as encrypted, password-protected profiles, then export them,
 edit them, or — the main use case — run any program with those variables
@@ -73,13 +74,16 @@ envrun list               # first run prints how to create a profile
 
 - **Overlay (default)**: child gets the full current environment; profile
   variables override same-name variables.
-- **`--clean`**: child gets only `PATH`, `HOME`, `TMPDIR`, `USER`, `LOGNAME`,
-  `SHELL`, `TERM` (when present in your environment) plus the profile
-  variables — nothing else.
+- **`--clean`**: child gets only a minimal base environment plus the profile
+  variables — nothing else. Unix base keys: `PATH`, `HOME`, `TMPDIR`, `USER`,
+  `LOGNAME`, `SHELL`, `TERM`. Windows base keys: `PATH`, `USERPROFILE`,
+  `TMP`, `TEMP`, `SystemRoot`, `ComSpec`. Missing keys are skipped, never
+  invented.
 - **`--dry-run`**: prints the command, mode, injected key names (never
   values) and an environment-size estimate; executes nothing.
-- **`--detach`**: starts the command in a new session (like nohup) and exits
-  immediately; the child keeps running after the terminal closes.
+- **`--detach`**: starts the command detached and exits immediately; the
+  child keeps running after envrun exits (unix: new session via `setsid`;
+  Windows: child naturally outlives the parent).
 - **Exit codes** (a stable interface for scripts):
 
   | Code | Meaning |
@@ -87,14 +91,18 @@ envrun list               # first run prints how to create a profile
   | 0 | success |
   | 1 | envrun error (decryption, I/O, bad usage of args) |
   | 2 | usage error (clap) |
-  | 126 | target has no execute permission |
+  | 126 | target has no execute permission (unix) |
   | 127 | target not found |
-  | 128+N | child killed by signal N (Ctrl-C → 130) |
+  | 128+N | child killed by signal N (Ctrl-C → 130) (unix) |
   | other | child's own exit code, passed through 1:1 |
 
-  Terminal signals (Ctrl-C, etc.) are caught by envrun and forwarded to the
-  child's process group — the same model as `timeout`/`docker run`. The
-  child also runs with core dumps disabled (`RLIMIT_CORE=0`).
+  **Unix**: terminal signals (Ctrl-C, etc.) are caught by envrun and
+  forwarded to the child's process group — the same model as
+  `timeout`/`docker run` — and the child runs with core dumps disabled
+  (`RLIMIT_CORE=0`).
+  **Windows**: the child shares envrun's console group, so Ctrl-C reaches it
+  natively; there is no separate signal-forwarding layer, and the
+  process-group/core-dump hardening does not apply.
 
 ### Scripts / CI
 
@@ -201,9 +209,9 @@ envrun complete --shell fish  > ~/.config/fish/completions/envrun.fish
 ```
 
 **Prebuilt binaries** — tagged releases (`v*`) publish static musl binaries
-(x86_64/aarch64 Linux) and a universal2 macOS build with SHA-256 checksums on
-the GitHub Releases page; `scripts/fuzz_cli.sh` and `cargo test` gate every
-CI run.
+(x86_64/aarch64 Linux), a universal2 macOS build, and an x86_64 Windows
+build (MSVC, `.zip`) with SHA-256 checksums on the GitHub Releases page;
+`scripts/fuzz_cli.sh` and `cargo test` gate every CI run.
 
 **Backup / restore** — profile files are self-contained encrypted blobs;
 backing up the profiles directory with any file-level tool is sufficient.
@@ -212,8 +220,14 @@ recovered from any backup (they are encrypted with the same password).
 
 ## Known limitations
 
-- v1 supports macOS and Linux only.
 - Exported/edited text is normalized (alphabetical keys, canonical quoting);
   comments and original formatting of the source `.env` are not preserved.
 - `edit` keeps a plaintext temp file (mode 0600, in `$TMPDIR`) only while the
   editor is open, and cleans up leftovers from killed sessions on the next run.
+- **Windows differences** (functional but not identical to unix): no
+  signal-forwarding layer — Ctrl-C reaches the child natively via the shared
+  console group, and 128+N exit codes do not occur; core dumps are a unix
+  concept so the `RLIMIT_CORE` hardening does not apply; file modes are NTFS
+  ACLs, so the explicit 0600/0700 hardening is a no-op (use ACLs on the
+  profile directory if you need per-user restrictions); the keychain cache
+  uses Windows Credential Manager via `envrun unlock`/`envrun lock`.

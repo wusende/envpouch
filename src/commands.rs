@@ -12,10 +12,11 @@ use zeroize::Zeroizing;
 use crate::crypto::{self, FileMeta};
 use crate::envfile::{self, EnvVars};
 use crate::exclude;
+use crate::keycache;
 use crate::mask;
 use crate::profile;
 #[cfg(unix)]
-use crate::{keycache, signals};
+use crate::signals;
 
 /// Passwords are always held in Zeroizing<String> and wiped on drop.
 fn prompt_password(prompt: &str) -> Result<Zeroizing<String>> {
@@ -613,6 +614,12 @@ pub fn run(
             eprintln!("error: environment too large (ARG_MAX limit)");
             return Ok(1);
         }
+        #[cfg(not(unix))]
+        Err(e) if e.raw_os_error() == Some(7) => {
+            // E2BIG on the Windows CRT is also errno 7
+            eprintln!("error: environment too large (ARG_MAX limit)");
+            return Ok(1);
+        }
         Err(e) => {
             return Err(e).with_context(|| format!("failed to spawn: {}", command[0]));
         }
@@ -621,41 +628,64 @@ pub fn run(
     if detach {
         let pid = child.id();
         drop(child);
-        // The orphaned child is reaped by launchd/init; do not wait (spec §4.5)
+        // unix: the orphaned child is reaped by launchd/init and survives
+        // (setsid'd into its own session); windows: child outlives envrun too
         return out_line(format!(
             "Detached: pid {pid} (envrun exits; stdout/stderr still go to this terminal)"
         ))
         .map(|()| 0);
     }
-    let pid = child.id() as i32;
 
-    // Polling loop (spec §4.2): 10 ms interval, negligible CPU cost.
-    // SIGTERM does NOT reach the child automatically (the terminal only
-    // signals the foreground group), so explicit forwarding is mandatory.
-    // On SIGTSTP envrun keeps running and polls (spec §4.2).
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(exit_code_of(&status));
-        }
-        let sig = signals::take();
-        if sig != 0 {
-            unsafe {
-                // Forward to the child's process group (covers descendants it
-                // spawned into the group); fall back to the single pid when
-                // the group no longer exists (e.g. child setsid'd away).
-                if libc::kill(-pid, sig) != 0 {
-                    libc::kill(pid, sig);
+    #[cfg(unix)]
+    {
+        let pid = child.id() as i32;
+        // Polling loop (spec §4.2): 10 ms interval, negligible CPU cost.
+        // SIGTERM does NOT reach the child automatically (the terminal only
+        // signals the foreground group), so explicit forwarding is mandatory.
+        // On SIGTSTP envrun keeps running and polls (spec §4.2).
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(exit_code_of(&status));
+            }
+            let sig = signals::take();
+            if sig != 0 {
+                unsafe {
+                    // Forward to the child's process group (covers descendants
+                    // it spawned into the group); fall back to the single pid
+                    // when the group no longer exists (e.g. child setsid'd).
+                    if libc::kill(-pid, sig) != 0 {
+                        libc::kill(pid, sig);
+                    }
                 }
             }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: console Ctrl-C reaches the child natively (same console
+        // group); there is no signal-forwarding equivalent to implement.
+        let status = child.wait()?;
+        Ok(exit_code_of(&status))
     }
 }
 
 /// Minimal base environment for `--clean` (spec §4.4): taken from the current
-/// environment, missing entries are skipped (never invented). TERM must be
-/// kept or TTY programs lose all colors.
+/// environment, missing entries are skipped (never invented). On unix TERM
+/// must be kept or TTY programs lose all colors; on Windows the equivalent
+/// minimal set is PATH/USERPROFILE plus the temp/system locations programs
+/// commonly expect.
+#[cfg(unix)]
 const CLEAN_BASE_KEYS: [&str; 7] = ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "SHELL", "TERM"];
+#[cfg(not(unix))]
+const CLEAN_BASE_KEYS: [&str; 6] = [
+    "PATH",
+    "USERPROFILE",
+    "TMP",
+    "TEMP",
+    "SystemRoot",
+    "ComSpec",
+];
 
 /// Final child environment:
 /// - overlay (default): full current env, same-name keys overridden by profile;
@@ -709,8 +739,6 @@ fn dry_run_report(
     vars: &EnvVars,
     env_map: &std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString>,
 ) -> Result<i32> {
-    use std::os::unix::ffi::OsStrExt;
-
     let quoted: Vec<String> = command.iter().map(|a| shell_quote(a)).collect();
     let mut out = String::new();
     let _ = writeln!(out, "Command: {}", quoted.join(" "));
@@ -725,9 +753,10 @@ fn dry_run_report(
 
     // Size estimate: env key+value bytes (+ separators) + argv bytes.
     // Warn on E2BIG risk (spec §4.4): spawn would fail above ~2 MiB ARG_MAX.
+    // as_encoded_bytes() is the cross-platform replacement for unix OsStrExt.
     let env_bytes: usize = env_map
         .iter()
-        .map(|(k, v)| k.as_bytes().len() + v.as_bytes().len() + 2)
+        .map(|(k, v)| k.as_encoded_bytes().len() + v.as_encoded_bytes().len() + 2)
         .sum();
     let argv_bytes: usize = command.iter().map(|a| a.len() + 1).sum();
     let total = env_bytes + argv_bytes;

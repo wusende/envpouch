@@ -85,8 +85,28 @@ jobs:
           name: macos-universal2
           path: envrun-*.tar.gz
 
+  build-windows-x86_64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Smoke test
+        run: target/release/envrun.exe --version
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/release/envrun.exe `
+            -DestinationPath "envrun-$($env:GITHUB_REF_NAME)-x86_64-windows.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: envrun-*.zip
+
   release:
-    needs: [build-linux-x86_64, build-linux-aarch64, build-macos]
+    needs: [build-linux-x86_64, build-linux-aarch64, build-macos, build-windows-x86_64]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -94,7 +114,7 @@ jobs:
           merge-multiple: true
       - name: Checksums
         run: |
-          sha256sum envrun-*.tar.gz > sha256sums.txt
+          sha256sum envrun-*.tar.gz envrun-*.zip > sha256sums.txt
           cat sha256sums.txt
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
@@ -102,4 +122,5 @@ jobs:
           generate_release_notes: true
           files: |
             envrun-*.tar.gz
+            envrun-*.zip
             sha256sums.txt
