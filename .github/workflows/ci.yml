@@ -25,6 +25,13 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Tests
         run: cargo test --release
+      # The musl targets link with rust-lld and bundled musl libc; keep CI
+      # honest about that staying true (no accidental C dependency).
+      - name: Build static musl (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --locked --target x86_64-unknown-linux-musl
 
   # The crate package is what `cargo install envpouch` compiles, and the npm
   # package is built from the same Cargo.toml version — check both without

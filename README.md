@@ -23,9 +23,9 @@ npm install -g envpouch    # prebuilt binary, no toolchain needed
 cargo install envpouch     # from source, needs Rust 1.85+
 ```
 
-Check with `envp --version`. Prebuilt binaries for Linux (glibc), macOS
-(one binary for Intel and Apple Silicon) and Windows are also on the
-[releases page](https://github.com/wusende/envpouch/releases). On Alpine or
+Check with `envp --version`. Prebuilt binaries for Linux (glibc and static
+musl), macOS (one binary for Intel and Apple Silicon) and Windows are also
+on the [releases page](https://github.com/wusende/envpouch/releases). On
 Windows arm64, use `cargo install`.
 
 ## Basics

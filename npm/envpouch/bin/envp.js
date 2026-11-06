@@ -19,14 +19,21 @@ const { spawn } = require("node:child_process");
 
 const HOMEPAGE = "https://github.com/wusende/envpouch";
 
-// One universal2 binary covers both macOS architectures; Linux builds are
-// per-architecture glibc binaries.
+// One universal2 binary covers both macOS architectures; Linux ships one
+// glibc binary and one static musl binary per architecture.
 const VENDOR_DIR = {
   "linux-x64": "linux-x64",
   "linux-arm64": "linux-arm64",
   "darwin-x64": "darwin-universal",
   "darwin-arm64": "darwin-universal",
   "win32-x64": "win32-x64",
+};
+
+// Static musl builds for Alpine/BusyBox systems, selected instead of the
+// glibc binary (which fails there with a bare "ENOENT" on exec).
+const MUSL_VENDOR_DIR = {
+  "linux-x64": "linux-musl-x64",
+  "linux-arm64": "linux-musl-arm64",
 };
 
 function bail(reason) {
@@ -39,9 +46,6 @@ function bail(reason) {
   process.exit(1);
 }
 
-// The Linux builds are glibc. A glibc binary started under musl fails with a
-// bare "ENOENT" on exec, which reads like a broken install; name the real
-// cause instead.
 function isMusl() {
   if (process.platform !== "linux") return false;
   try {
@@ -52,13 +56,10 @@ function isMusl() {
 }
 
 const key = `${process.platform}-${process.arch}`;
-const dir = VENDOR_DIR[key];
+const musl = isMusl();
+const dir = musl ? MUSL_VENDOR_DIR[key] : VENDOR_DIR[key];
 if (!dir) {
-  bail(`no prebuilt binary for ${key}`);
-}
-
-if (isMusl()) {
-  bail(`${key} is a glibc build and this system uses musl (Alpine?)`);
+  bail(`no prebuilt binary for ${key}${musl ? " (musl)" : ""}`);
 }
 
 const BIN = path.join(

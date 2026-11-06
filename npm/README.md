@@ -9,8 +9,9 @@
 
 ## npm 包的形态
 
-npm 上只有一个包 `envpouch`，里面**内置了 4 个平台的二进制**，启动壳按
-`process.platform` / `process.arch` 选一个执行。**包名是 `envpouch`，命令是
+npm 上只有一个包 `envpouch`，里面**内置了 6 个平台的二进制**，启动壳按
+`process.platform` / `process.arch` 选一个执行（Linux 上再用 `process.report`
+区分 glibc / musl）。**包名是 `envpouch`，命令是
 `envp`**：`bin` 只声明 `envp`，安装时的 postinstall 会打印这条提示（写
 `/dev/tty` 而不是 stdout——npm 默认 `foreground-scripts=false`，会把脚本输出吞掉；
 没有 tty 时退回 stdout）。
@@ -21,13 +22,18 @@ envpouch/
 ├── bin/postinstall.js        安装后打印「命令是 envp」
 ├── vendor/linux-x64/envp
 ├── vendor/linux-arm64/envp
+├── vendor/linux-musl-x64/envp     静态链接，Alpine/BusyBox 用
+├── vendor/linux-musl-arm64/envp
 ├── vendor/darwin-universal/envp   universal2，两个架构共用
 └── vendor/win32-x64/envp.exe
 ```
 
-Linux 是 glibc 构建（未提供 musl 静态构建），x86_64 在 ubuntu-22.04 上编
-（glibc 2.35 下限）、arm64 在 ubuntu-24.04-arm 上编（2.39）；启动壳对
-musl 给出明确提示并回退 `cargo install`。
+Linux 每个架构出两份：glibc 构建（x86_64 在 ubuntu-22.04 上编，glibc 2.35
+下限；arm64 在 ubuntu-24.04-arm 上编，2.39）和静态 musl 构建（同 runner；
+musl target 用 rust-lld + 自带 musl libc 链接，不需要 musl 工具链，CI 里有
+构建防护）。启动壳探测到 musl 就选 `linux-musl-*` 目录，目录缺失即安装
+损坏（提示 `npm rebuild envpouch`）；旧版包的壳在 musl 上仍回退
+`cargo install` 提示。
 macOS 用 `lipo` 合成的 universal2，一份二进制覆盖
 x64 与 arm64（启动壳把 `darwin-x64` / `darwin-arm64` 都映射到该目录）。
 
@@ -35,7 +41,8 @@ x64 与 arm64（启动壳把 `darwin-x64` / `darwin-arm64` 都映射到该目录
 占位审核态，每个包都要人工批，且 `<name>-win32-x64` 这类包名撞反垃圾规则
 （同类案例 `keelrun-cli-win32-x64`）。为什么不改成安装时从 GitHub 下载：
 GitHub Releases 没有 npm 那样的国内镜像，安装路径上放了最不可达的一环。
-单包内置的代价是每个用户都为 4 个平台付流量（~7 MB tarball）。
+单包内置的代价是每个用户都为 6 个平台付流量（~10 MB 解包，下载包比
+4 平台时多约 1.5 MB）。
 
 ## 一次性准备（只有账号持有人能做）
 
@@ -112,10 +119,12 @@ envp --version
 |---|---|---|
 | `linux-x64` | `envpouch-x86_64-unknown-linux-gnu.tar.gz` | glibc 2.35+（22.04 构建） |
 | `linux-arm64` | `envpouch-aarch64-unknown-linux-gnu.tar.gz` | glibc 2.39+（24.04 构建） |
+| `linux-musl-x64` | `envpouch-x86_64-unknown-linux-musl.tar.gz` | 任意 x86_64 Linux（静态链接） |
+| `linux-musl-arm64` | `envpouch-aarch64-unknown-linux-musl.tar.gz` | 任意 arm64 Linux（静态链接） |
 | `darwin-universal` | `envpouch-universal2-apple-darwin.tar.gz` | macOS 11+，Intel/Apple Silicon |
 | `win32-x64` | `envpouch-x86_64-pc-windows-msvc.zip` | Windows 10+ |
 
-没覆盖的平台（musl/Alpine、Windows arm64、Linux armv7 等）由启动壳给出明确提示并回退到
+没覆盖的平台（Windows arm64、Linux armv7、xBSD 等）由启动壳给出明确提示并回退到
 `cargo install envpouch`。
 
 ## 文件

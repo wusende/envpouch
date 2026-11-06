@@ -3,7 +3,8 @@
 #
 # Every platform's binary is bundled in vendor/, so installing needs only the
 # npm registry (and its mirrors) — no GitHub, no network at install time. The
-# only postinstall script prints the command name (`envp`). The trade-off is a ~7 MB tarball, paid by everyone, to avoid a
+# only postinstall script prints the command name (`envp`). The trade-off is a
+# ~10 MB unpacked package (~7.5 MB tarball), paid by everyone, to avoid a
 # download step that is unreachable behind the GFW.
 #
 #   scripts/npm-pack.sh                        # fetch assets from GitHub Releases
@@ -19,7 +20,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 usage() {
-  sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 mode=release
@@ -66,12 +67,14 @@ trap 'rm -rf "$tmp"' EXIT
 rm -rf "$dist"
 mkdir -p "$dist/envpouch/vendor"
 
-# The Linux builds are glibc and macOS ships one universal2 binary for both
-# architectures.
+# Linux ships both glibc and static musl binaries per architecture; macOS
+# ships one universal2 binary for both architectures.
 # vendor dir | release asset | binary name | rust targets packed inside
 platforms=(
   "linux-x64|envpouch-x86_64-unknown-linux-gnu.tar.gz|envp|x86_64-unknown-linux-gnu"
   "linux-arm64|envpouch-aarch64-unknown-linux-gnu.tar.gz|envp|aarch64-unknown-linux-gnu"
+  "linux-musl-x64|envpouch-x86_64-unknown-linux-musl.tar.gz|envp|x86_64-unknown-linux-musl"
+  "linux-musl-arm64|envpouch-aarch64-unknown-linux-musl.tar.gz|envp|aarch64-unknown-linux-musl"
   "darwin-universal|envpouch-universal2-apple-darwin.tar.gz|envp|universal2-apple-darwin"
   "win32-x64|envpouch-x86_64-pc-windows-msvc.zip|envp.exe|x86_64-pc-windows-msvc"
 )
@@ -120,8 +123,10 @@ if [ "$mode" = target ]; then
   partial=true
   host=$(rustc -vV | sed -n 's/^host: //p')
   case "$host" in
-    x86_64-unknown-linux-*) host_slug=linux-x64 ;;
-    aarch64-unknown-linux-*) host_slug=linux-arm64 ;;
+    x86_64-unknown-linux-gnu) host_slug=linux-x64 ;;
+    x86_64-unknown-linux-musl) host_slug=linux-musl-x64 ;;
+    aarch64-unknown-linux-gnu) host_slug=linux-arm64 ;;
+    aarch64-unknown-linux-musl) host_slug=linux-musl-arm64 ;;
     *-apple-darwin) host_slug=darwin-universal ;;
     x86_64-pc-windows-*) host_slug=win32-x64 ;;
     *) echo "no prebuilt envpouch for host $host" >&2; exit 1 ;;
@@ -235,6 +240,8 @@ NPM_DIST=$dist NPM_VERSION=$version NPM_ALLOW_PARTIAL=$([ "$partial" = true ] &&
   const expected = [
     ["linux-x64", "envp"],
     ["linux-arm64", "envp"],
+    ["linux-musl-x64", "envp"],
+    ["linux-musl-arm64", "envp"],
     ["darwin-universal", "envp"],
     ["win32-x64", "envp.exe"],
   ];
@@ -257,5 +264,5 @@ NPM_DIST=$dist NPM_VERSION=$version NPM_ALLOW_PARTIAL=$([ "$partial" = true ] &&
     process.exit(1);
   }
   const kind = allowPartial ? "partial: local platform only" : "all platforms";
-  console.log(`ok: envpouch@${version}, ${present.length}/4 platforms, ${(total / 1048576).toFixed(1)} MB unpacked (${kind})`);
+  console.log(`ok: envpouch@${version}, ${present.length}/${expected.length} platforms, ${(total / 1048576).toFixed(1)} MB unpacked (${kind})`);
 '
