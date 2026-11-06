@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Launcher for the binary bundled under vendor/.
 // Arguments, stdio, signals and the exit code pass straight through, so in a
-// script `envp run prod -- ./x` behaves exactly like the native binary.
+// script `envp run prod ./x` behaves exactly like the native binary.
 //
 // Every platform ships inside the package (see scripts/npm-pack.sh): installing
 // needs only the npm registry, never GitHub, and no network. The only install

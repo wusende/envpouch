@@ -18,7 +18,7 @@ injected:
 
 ```sh
 envp import prod --from .env.production
-envp run prod -- ./start-server.sh
+envp run prod ./start-server.sh
 ```
 
 Every decrypting command obtains the password via the interactive prompt, the
@@ -41,7 +41,7 @@ postinstall writes a reminder naming the command straight to the terminal.
 look for `Installing .../bin/envp` and
 
 ```text
-Installed package `envpouch v0.1.0` (executable `envp`)
+Installed package `envpouch vX.Y.Z` (executable `envp`)
 ```
 
 That line is the authoritative "the command is `envp`" for cargo users; the
@@ -56,7 +56,7 @@ is a thin launcher around that same binary; musl/Alpine and Windows arm64 are
 not covered, use `cargo install` there.
 
 `cargo install` lands in `~/.cargo/bin`, which sudo can't see. So if you later
-run `sudo envp run prod -- ...`, use `sudo ~/.cargo/bin/envp ...`.
+run `sudo envp run prod ...`, use `sudo ~/.cargo/bin/envp ...`.
 
 From a checkout (requires Rust 1.85+, edition 2024):
 
@@ -70,7 +70,7 @@ cargo test --release
 After installing, verify with:
 
 ```sh
-envp --version          # envp 0.1.0
+envp --version          # envp X.Y.Z
 envp list               # first run prints how to create a profile
 ```
 
@@ -89,7 +89,7 @@ start.
 | `envp unset <name> KEY...` | Remove variables | yes |
 | `envp fpm-snippet <name>` | Emit php-fpm pool `env[...]` lines | yes |
 | `envp diff <a> <b>` | Compare two profiles (masked values) | yes |
-| `envp run <name> [--clean] [--dry-run] [--detach] -- <cmd> [args...]` | Run a command with the variables injected | yes |
+| `envp run <name> [--clean] [--dry-run] [--detach] <cmd> [args...]` | Run a command with the variables injected | yes |
 | `envp list` (alias: `envp ls`) | List profiles | no |
 | `envp rm <name>` | Delete a profile | no |
 | `envp passwd <name>` | Change the profile password | yes |
@@ -138,6 +138,12 @@ line per prompt, in prompt order (`passwd` reads two lines: current then new;
 
 ### Run
 
+- **Command and arguments**: everything from the command name onward is
+  passed to the child untouched, flags included — no `--` needed. The
+  standard `--` separator is only required when the command's first token is
+  one of envp's own options (`--clean`, `--dry-run`, `--detach`,
+  `--password-stdin`, `-h`/`--help`), e.g. `envp run prod -- --clean`; envp
+  consumes the `--` itself and never passes it to the child.
 - **Overlay (default)**: child gets the full current environment; profile
   variables override same-name variables.
 - **`--clean`**: child gets only a minimal base environment plus the profile
@@ -179,7 +185,7 @@ stdin one line per prompt, in prompt order.
 ```sh
 # feed the password on stdin (first line); avoid ENVPOUCH_PASSPHRASE-style
 # env vars on purpose: /proc/<pid>/environ is readable by same-user processes
-printf '%s\n' "$MY_SECRET_PASSPHRASE" | envp run prod --password-stdin -- ./deploy.sh
+printf '%s\n' "$MY_SECRET_PASSPHRASE" | envp run prod --password-stdin ./deploy.sh
 
 # the flag may also come before the subcommand, and other commands take it too
 printf '%s\n' "$PW" | envp --password-stdin export prod -o /tmp/prod.env
@@ -196,7 +202,7 @@ printf '%s\n' "$NEW_PW" | envp import prod --from .env.production --password-std
 
 # cache the password in the OS keychain for 15 minutes
 envp unlock prod --ttl 900
-envp run prod -- ./dev-server.sh          # no prompt
+envp run prod ./dev-server.sh             # no prompt
 envp lock prod                             # drop it now
 ```
 
@@ -275,7 +281,7 @@ decrypting invocation to `$ENVPOUCH_HOME/audit.log`:
 
 ```sh
 export ENVPOUCH_AUDIT=1
-envp run prod -- ./deploy.sh
+envp run prod ./deploy.sh
 tail -1 "$HOME/.envpouch/audit.log"    # 2026-11-06T09:12:00+0800	run	prod	exit=0
 ```
 

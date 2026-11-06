@@ -17,7 +17,7 @@ const pkg = require("../package.json");
 const message =
   `\nenvpouch ${pkg.version} installed — the command is \`envp\` (not \`envpouch\`).\n` +
   `\n  envp import prod --from .env.production   # store a .env file as an encrypted profile\n` +
-  `  envp run prod -- ./start-server.sh        # run a command with those variables\n` +
+  `  envp run prod ./start-server.sh           # run a command with those variables\n` +
   `  envp --help                               # all commands\n` +
   `\nDocs: ${pkg.homepage}\n\n`;
 

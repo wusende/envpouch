@@ -740,7 +740,7 @@ pub fn diff(name_a: &str, name_b: &str, password_stdin: bool) -> Result<()> {
     write_stdout(out.as_bytes())
 }
 
-/// `envp run <name> [--clean] [--dry-run] [--detach] -- <cmd> [args...]`
+/// `envp run <name> [--clean] [--dry-run] [--detach] <cmd> [args...]`
 /// (`--password-stdin` is a global flag, usable with this and every other
 /// password-requiring command)
 ///

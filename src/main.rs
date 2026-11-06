@@ -8,7 +8,7 @@
 //! - `envp edit <name>`                                            edit variables in $EDITOR
 //! - `envp fpm-snippet <name>`                                     php-fpm pool env[...] lines
 //! - `envp diff <a> <b>`                                           compare two profiles (masked)
-//! - `envp run <name> -- <command> [args...]`                      run with the variables injected
+//! - `envp run <name> [options] <command> [args...]`                run with the variables injected
 //! - `envp list / rm / passwd / unlock / lock`                     profile management
 //!
 //! Every decrypting command obtains the password via the global
@@ -41,7 +41,7 @@ use clap::{CommandFactory, Parser, Subcommand};
     long_about = "Store .env files as encrypted, password-protected profiles (Argon2id + AES-256-GCM),\nexport them, or inject them into child processes. Every import/show/export/run\nrequires the password.\n\nThe project is called envpouch; the command is envp.",
     after_help = "Quick start:
   envp import prod --from .env.production   store a .env file as an encrypted profile
-  envp run prod -- ./start-server.sh        run a command with those variables
+  envp run prod ./start-server.sh           run a command with those variables
   envp list                                 list profiles (no password)
 
 Docs: https://github.com/wusende/envpouch"
@@ -141,7 +141,8 @@ enum Commands {
         /// Start the command detached in a new session; envp exits immediately
         #[arg(long)]
         detach: bool,
-        /// Command and arguments to execute (separate them with --)
+        /// Command and arguments to execute (everything after it is passed through;
+        /// prefix with -- only if the command starts with an envp option)
         #[arg(
             trailing_var_arg = true,
             allow_hyphen_values = true,
