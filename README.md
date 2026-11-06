@@ -24,7 +24,7 @@ cargo install envpouch     # from source, needs Rust 1.85+
 ```
 
 Check with `envp --version`. Prebuilt binaries for Linux (glibc), macOS
-(universal2) and Windows are also on the
+(one binary for Intel and Apple Silicon) and Windows are also on the
 [releases page](https://github.com/wusende/envpouch/releases). On Alpine or
 Windows arm64, use `cargo install`.
 
@@ -37,10 +37,13 @@ envp show prod                            # variables, values masked
 envp run prod ./start-server.sh           # decrypt and run with them set
 ```
 
+Each profile is one encrypted file under `~/.envpouch/profiles/` — copy
+that directory to back everything up (see [Files](#files)).
+
 Every command that decrypts gets the password one of three ways: the
 interactive prompt (default), `--password-stdin` reading it from stdin
 for scripts, or `--password-file <file>` reading one password per line
-from a 0600 file for services (see
+from a file only your user can read (mode 0600) for services (see
 [systemd / supervisord](#systemd--supervisord)).
 
 **There is no password recovery.** A lost password means the profile is
@@ -49,10 +52,9 @@ gone. Keep passwords in a password manager.
 ## Commands
 
 All commands except `list`, `rm`, `cp`, `rename` and `complete` need the
-password. `--password-stdin` and `--password-file` are global flags and work with
-every one of them, before or after the subcommand (the two are mutually
-exclusive). With a file, one line is consumed per password prompt, in
-prompt order — same contract as stdin.
+password. `--password-stdin` and `--password-file` are global flags that
+work with every one of them, before or after the subcommand (the two are
+mutually exclusive).
 
 | Command | What it does |
 |---|---|
@@ -81,9 +83,10 @@ envp run prod --dry-run ./deploy.sh      # print what would run, never values
 envp run prod --allow-core-dumps ./srv   # keep core dumps (LimitCORE= applies)
 ```
 
-For an ad-hoc background process, `nohup envp run prod ./server &` works:
-envp execs the app, so no wrapper remains. Use systemd/supervisord when
-you need restarts and supervision.
+For an ad-hoc background process, `nohup envp run prod ./server &` works
+(with `--password-file`; a backgrounded job cannot prompt). envp turns
+into the app and leaves nothing behind. Use systemd/supervisord when you
+need restarts and supervision.
 
 - By default the command gets your full environment with the profile
   variables on top. `--clean` gives it only `PATH`, `HOME`, `USER` and a
@@ -91,18 +94,18 @@ you need restarts and supervision.
 - Everything after the command name goes to it untouched. `--` is
   only needed when the command itself starts with an envp option, e.g.
   `envp run prod -- --clean`.
-- The exit status is the command's own (envp execs it on unix). `1` is
-  an envp error such as a wrong password, `2` a usage error, `127`
-  command not found.
-- On unix, envp **execs the command in place** after decrypting: the
-  command keeps envp's PID and process group, so Ctrl-C/Ctrl-Z,
-  supervisor signals and the exit status go straight to it. There is no
-  wrapper process in the service tree.
-- Because of that exec, decrypted variables, the derived key and
-  password buffers do not stay in memory for the service lifetime.
-- Core dumps are disabled for the command by default (leak-surface
-  reduction); `--allow-core-dumps` keeps the supervisor's limits instead
-  (systemd `LimitCORE=`, `ulimit -c`).
+- On unix, after decrypting envp **execs the command in place**: envp
+  turns into the command itself, keeping the same PID, process group and
+  terminal. Nothing named envp stays in the process tree, so
+  Ctrl-C/Ctrl-Z, supervisor signals and the exit status reach the
+  application directly.
+- The exit status you get is the application's own. envp itself exits
+  nonzero only for its own errors: `1` such as a wrong password, `2` a
+  usage error, `126` no execute permission, `127` command not found.
+- Core dumps are disabled for the command by default (a crash cannot
+  dump memory that holds the decrypted variables); `--allow-core-dumps`
+  keeps the supervisor's limits instead (systemd `LimitCORE=`,
+  `ulimit -c`).
 
 ## Scripts / CI / services
 
@@ -122,11 +125,9 @@ files (chmod 600) so the file cannot silently become the weak link.
 
 ## systemd / supervisord
 
-`envp run` is a password-bearing launcher: it decrypts, then (on unix)
-execs the application, so it does not stay in the process tree. Every
-start and every automatic restart still needs the password, unattended.
-Use `--password-file` (or a systemd credential) for this — there is no
-interactive tty in a system service.
+Every start and every automatic restart needs the password unattended —
+there is no interactive tty in a system service — so use
+`--password-file` (or a systemd credential).
 
 ### systemd
 
@@ -159,7 +160,7 @@ password files.
   `WATCHDOG_USEC`, `JOURNAL_STREAM` and other systemd-provided variables.
 - Every start pays one Argon2id derivation (tens to hundreds of
   milliseconds). Give crash-looping services `RestartSec` and
-  `StartLimitBurst` headroom so KDF time does not eat the start budget.
+  `StartLimitBurst` headroom so this delay does not eat the start budget.
 - The application receives SIGTERM directly; if it dies from the signal,
   systemd reports `code=killed, signal=TERM` (conventional), not a
   wrapper's 143.
@@ -211,6 +212,8 @@ export ENVPOUCH_AUDIT=1                        # log each decrypting command to 
 The audit log records timestamp, command, profile and exit code, never
 variable names or values.
 
+## Shell completion
+
 ```sh
 envp complete --shell bash > ~/.local/share/bash-completion/completions/envp
 envp complete --shell zsh   > "${fpath[1]}/_envp"
@@ -223,6 +226,10 @@ Profiles are encrypted with AES-256-GCM, keys derived via Argon2id, fresh
 salt and nonce on every write, atomic writes, files mode 0600. This
 protects data at rest: lost laptops, backups, accidentally committed
 directories.
+
+On unix, `run` execs the application instead of wrapping it, so decrypted
+variables, the derived key and password buffers do not linger in memory
+for the service lifetime.
 
 It does not protect against the same user reading a running process's
 environment (`/proc/<pid>/environ`, `ps eww`), root, or keyloggers. No
@@ -237,4 +244,7 @@ application sees.
   is open.
 - On Windows there is no `exec`: `run` spawns and waits, so one extra
   process remains (Ctrl-C reaches the application via the shared console).
-  File permissions are NTFS ACLs rather than 0600.
+  File permissions are NTFS ACLs rather than 0600. There, `run
+  --password-stdin` reads through a buffered pipe: if the command itself
+  also reads stdin, buffered bytes can be lost to it (unix reads
+  byte-by-byte and leaves the rest of the pipe alone).
