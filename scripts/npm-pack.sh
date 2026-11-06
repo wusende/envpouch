@@ -94,6 +94,24 @@ checksum() {
   else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 
+# curl has no connect timeout by default, so an unreachable GitHub (no proxy in
+# this shell) hangs the staging step forever instead of reporting an error.
+# --speed-limit/--speed-time also aborts a transfer that stalls mid-body.
+download() {
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+    --connect-timeout 10 --max-time 300 --speed-limit 1024 --speed-time 30 \
+    -o "$2" "$1"
+}
+
+# A release cut before the binary was renamed still contains the old name; say
+# so instead of letting cp fail with "No such file or directory".
+require_bin() {
+  local dir=$1 bin=$2 archive=$3
+  [ -f "$dir/$bin" ] && return 0
+  echo "$archive does not contain $bin (it has: $(ls -A "$dir" | tr '\n' ' '))" >&2
+  return 1
+}
+
 # Local mode stages only what this machine has built, for testing the launcher;
 # release and artifacts mode must cover every platform.
 partial=false
@@ -135,6 +153,8 @@ for entry in "${platforms[@]}"; do
       archive="$artifacts_dir/$asset"
       [ -f "$archive" ] || { echo "missing $archive" >&2; exit 1; }
       extract "$archive" "$tmp/$slug"
+      require_bin "$tmp/$slug" "$bin" "$archive" ||
+        { echo "hint: the CI artifact is stale — rebuild the release workflow" >&2; exit 1; }
       cp "$tmp/$slug/$bin" "$dest/$bin"
       ;;
     release)
@@ -142,10 +162,15 @@ for entry in "${platforms[@]}"; do
       # --retry-all-errors: through a proxy, curl (35) "TLS connect ... unexpected
       # eof" is a transient handshake failure, not a 4xx/5xx, so plain --retry
       # never retries it.
-      curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
-        -o "$tmp/$asset" "$base/$asset"
-      curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
-        -o "$tmp/$asset.sha256" "$base/$asset.sha256"
+      download "$base/$asset" "$tmp/$asset" || {
+        echo "cannot download $base/$asset" >&2
+        echo "hint: this shell has no route to GitHub — set HTTPS_PROXY if you have a proxy" >&2
+        exit 1
+      }
+      download "$base/$asset.sha256" "$tmp/$asset.sha256" || {
+        echo "cannot download $base/$asset.sha256" >&2
+        exit 1
+      }
 
       expected=$(cut -d' ' -f1 "$tmp/$asset.sha256" | tr -d '[:space:]' | tr 'A-Z' 'a-z')
       actual=$(checksum "$tmp/$asset")
@@ -155,6 +180,10 @@ for entry in "${platforms[@]}"; do
       fi
 
       extract "$tmp/$asset" "$tmp/$slug"
+      require_bin "$tmp/$slug" "$bin" "$asset" || {
+        echo "hint: release v$version predates a binary rename — bump the version in Cargo.toml and tag a new release" >&2
+        exit 1
+      }
       cp "$tmp/$slug/$bin" "$dest/$bin"
       ;;
   esac
