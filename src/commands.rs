@@ -17,8 +17,6 @@ use crate::exclude;
 use crate::keycache;
 use crate::mask;
 use crate::profile;
-#[cfg(unix)]
-use crate::signals;
 
 /// Passwords are always held in Zeroizing<String> and wiped on drop.
 fn prompt_password(prompt: &str) -> Result<Zeroizing<String>> {
@@ -861,19 +859,23 @@ pub fn diff(name_a: &str, name_b: &str, input: &mut PasswordInput) -> Result<()>
 /// <cmd> [args...]` (`--password-stdin` / `--password-file` are global flags,
 /// usable with this and every other password-requiring command)
 ///
-/// Returns the child exit code (spec §3): child exit code 1:1, 127 not found,
-/// 126 no execute permission, 128+N killed by signal N, 1 for envp errors.
+/// Process model: on unix the foreground path decrypts, prepares the
+/// environment, then `exec`s the target in place. The application keeps
+/// envp's PID and process group, so Ctrl-C/Ctrl-Z, supervisor signals and
+/// the exit status go straight to it — there is no wrapper process between
+/// systemd/supervisord and the app. `--detach` is the exception: it spawns
+/// the command into a new session and envp exits immediately. Windows has
+/// no `exec`, so it spawns and waits there.
 ///
-/// Process model (spec §4.1, do not change): the child runs in its own
-/// process group (`process_group(0)`), envp catches terminal signals and
-/// forwards them — the same model as `timeout`/`docker run`. No `sh -c`
-/// wrapping: the target program is exec'd directly.
+/// Returns the child exit code on the paths that return (dry-run, detach,
+/// windows, errors): 1:1 for the child, 127 not found, 126 no execute
+/// permission, 1 for envp errors. A successful unix foreground `exec` never
+/// returns.
 ///
-/// Secrets hygiene: once the merged environment has been copied into the
-/// child's `Command`, the plaintext profile vars and env map are dropped, so
-/// a long-running service does not keep them in envp's heap for its whole
-/// lifetime (review finding). Core dumps stay disabled by default; pass
-/// `allow_core_dumps` to keep the supervisor's limits (systemd
+/// Secrets hygiene: `exec` replaces envp's image, so decrypted vars, the
+/// derived key and password buffers are reclaimed by the kernel instead of
+/// living for the service lifetime. Core dumps stay disabled by default;
+/// pass `allow_core_dumps` to keep the supervisor's limits (systemd
 /// `LimitCORE=`, `ulimit -c`).
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -909,122 +911,115 @@ pub fn run(
     for (k, v) in &env_map {
         cmd.env(k, v);
     }
-    // The child env was copied into `cmd`; release the plaintext maps now so
-    // they do not sit in envp's memory for the whole service lifetime.
+    // The command env was copied into `cmd`; release the plaintext maps now.
+    // The exec path replaces the image anyway, but keeping this also covers
+    // the error and detach paths.
     drop(env_map);
     drop(vars);
 
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // Own process group: terminal-generated signals reach envp only and
-        // are forwarded explicitly (spec §4.1-§4.2).
-        cmd.process_group(0);
-        // Best-effort: disable core dumps for the child to shrink the leak
+
+        // Best-effort: disable core dumps for the target to shrink the leak
         // surface (spec §1, §4.6), unless the operator opted out to keep the
-        // supervisor's core-dump policy. setrlimit is async-signal-safe,
-        // allowed inside pre_exec; ignore failures (rare, e.g. hard limit).
+        // supervisor's core-dump policy. The limit survives exec (foreground)
+        // and is inherited by the spawned child (--detach).
         if !allow_core_dumps {
-            unsafe {
-                cmd.pre_exec(|| {
-                    // setrlimit takes a struct pointer on every unix (libc maps it
-                    // to the same signature on Linux and BSD/macOS).
-                    let lim = libc::rlimit {
-                        rlim_cur: 0,
-                        rlim_max: 0,
-                    };
-                    libc::setrlimit(libc::RLIMIT_CORE, &lim);
-                    Ok(())
-                });
-            }
+            disable_core_dumps();
         }
+
         if detach {
-            // Spec §4.5 (P2): nohup-style detachment — new session, envp
-            // exits immediately after spawn. setsid is async-signal-safe.
+            // nohup-style detachment: new session, envp exits immediately.
+            // Do not also call process_group(0): setsid creates a fresh
+            // session/group, and a process group leader cannot call setsid.
             unsafe {
                 cmd.pre_exec(|| {
-                    libc::setsid();
+                    if libc::setsid() == -1 {
+                        libc::setpgid(0, 0);
+                    }
                     Ok(())
                 });
             }
+            let child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => return start_error(e, command),
+            };
+            let pid = child.id();
+            drop(child);
+            return out_line(format!(
+                "Detached: pid {pid} (envp exits; stdout/stderr still go to this terminal)"
+            ))
+            .map(|()| 0);
         }
+
+        // Foreground: become the target. exec() only returns on failure;
+        // PID, process group, tty and signal dispositions are preserved, so
+        // supervisors and job control see the application itself.
+        //
+        // Audit gets a line before the image is replaced; envp can no longer
+        // observe the application's exit status afterwards.
+        crate::audit::record("run", Some(name), "exec");
+        let err = cmd.exec();
+        start_error(err, command)
     }
 
-    // Install forwarders after password entry so password stdin reads are
-    // undisturbed and no signal gets lost before the child exists. Not needed
-    // for --detach (envp exits immediately).
-    if !detach {
-        #[cfg(unix)]
-        signals::install();
-    }
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("error: command not found: {}", command[0]);
-            return Ok(127);
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!("error: permission denied: {}", command[0]);
-            return Ok(126);
-        }
-        // libc::E2BIG is 7 on unix and on the Windows CRT alike, so this one
-        // arm covers both platforms (no separate windows match needed)
-        Err(e) if e.raw_os_error() == Some(libc::E2BIG) => {
-            eprintln!("error: environment too large (ARG_MAX limit)");
-            return Ok(1);
-        }
-        Err(e) => {
-            return Err(e).with_context(|| format!("failed to spawn: {}", command[0]));
-        }
-    };
-    // The child has its own copy of the environment now; dropping `cmd`
-    // releases the parent-side copy std keeps inside the Command.
-    drop(cmd);
-
-    if detach {
-        let pid = child.id();
-        drop(child);
-        // unix: the orphaned child is reaped by launchd/init and survives
-        // (setsid'd into its own session); windows: child outlives envp too
-        return out_line(format!(
-            "Detached: pid {pid} (envp exits; stdout/stderr still go to this terminal)"
-        ))
-        .map(|()| 0);
-    }
-
-    #[cfg(unix)]
-    {
-        let pid = child.id() as i32;
-        // Polling loop (spec §4.2): 10 ms interval, negligible CPU cost.
-        // SIGTERM does NOT reach the child automatically (the terminal only
-        // signals the foreground group), so explicit forwarding is mandatory.
-        // On SIGTSTP envp keeps running and polls (spec §4.2).
-        loop {
-            if let Some(status) = child.try_wait()? {
-                return Ok(exit_code_of(&status));
-            }
-            let sig = signals::take();
-            if sig != 0 {
-                unsafe {
-                    // Forward to the child's process group (covers descendants
-                    // it spawned into the group); fall back to the single pid
-                    // when the group no longer exists (e.g. child setsid'd).
-                    if libc::kill(-pid, sig) != 0 {
-                        libc::kill(pid, sig);
-                    }
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    }
     #[cfg(not(unix))]
     {
-        // Windows: console Ctrl-C reaches the child natively (same console
-        // group); there is no signal-forwarding equivalent to implement.
+        // Windows has no exec: spawn and wait. Console Ctrl-C reaches the
+        // child natively (same console group).
+        let _ = allow_core_dumps; // no RLIMIT_CORE on Windows
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => return start_error(e, command),
+        };
+        // The child has its own copy of the environment now; dropping `cmd`
+        // releases the parent-side copy std keeps inside the Command.
+        drop(cmd);
+        if detach {
+            let pid = child.id();
+            drop(child);
+            return out_line(format!(
+                "Detached: pid {pid} (envp exits; stdout/stderr still go to this terminal)"
+            ))
+            .map(|()| 0);
+        }
         let status = child.wait()?;
         Ok(exit_code_of(&status))
     }
+}
+
+/// Best-effort `RLIMIT_CORE = 0` for the program envp is about to exec/spawn.
+/// Failure is ignored (e.g. a hard limit the caller cannot lower further).
+#[cfg(unix)]
+fn disable_core_dumps() {
+    unsafe {
+        let lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        libc::setrlimit(libc::RLIMIT_CORE, &lim);
+    }
+}
+
+/// Map a failed spawn/exec to the documented exit codes (127 not found,
+/// 126 no execute permission, 1 environment too large) or an envp error.
+fn start_error(e: std::io::Error, command: &[String]) -> Result<i32> {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        eprintln!("error: command not found: {}", command[0]);
+        return Ok(127);
+    }
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        eprintln!("error: permission denied: {}", command[0]);
+        return Ok(126);
+    }
+    // libc::E2BIG is 7 on unix and on the Windows CRT alike, so this one
+    // check covers both platforms.
+    if e.raw_os_error() == Some(libc::E2BIG) {
+        eprintln!("error: environment too large (ARG_MAX limit)");
+        return Ok(1);
+    }
+    Err(e).with_context(|| format!("failed to start: {}", command[0]))
 }
 
 /// Minimal base environment for `--clean` (spec §4.4): taken from the current
@@ -1124,23 +1119,11 @@ fn dry_run_report(
     Ok(0)
 }
 
-/// Map a finished child status to an exit code (spec §3).
+/// Map a finished child status to an exit code (Windows has no signals, so
+/// the unix exec path never needs this).
+#[cfg(not(unix))]
 fn exit_code_of(status: &std::process::ExitStatus) -> i32 {
-    match status.code() {
-        Some(c) => c,
-        None => {
-            // Killed by a signal: exit 128+N per shell convention
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::ExitStatusExt;
-                status.signal().map(|s| 128 + s).unwrap_or(1)
-            }
-            #[cfg(not(unix))]
-            {
-                1
-            }
-        }
-    }
+    status.code().unwrap_or(1)
 }
 
 /// `--password-stdin`: read the next line of stdin, stripping `\n`/`\r\n`
@@ -1149,17 +1132,15 @@ fn exit_code_of(status: &std::process::ExitStatus) -> i32 {
 /// runaway pipe cannot balloon memory. No ENVPOUCH_PASSPHRASE env var on
 /// purpose — process env is readable by same-user processes via /proc.
 fn read_password_stdin() -> Result<Zeroizing<String>> {
-    use std::io::Read as _;
     const MAX_PASSWORD_BYTES: usize = 8 * 1024;
     // Line-oriented AND bounded: multi-prompt commands (passwd, diff) read
     // one line per call; a runaway pipe without newlines cannot balloon
     // memory. The only legal over-length line is exactly MAX password bytes
     // plus the terminating newline.
     let mut buf = Zeroizing::new(Vec::new());
-    let mut lock = std::io::stdin().lock();
     let mut byte = [0u8; 1];
     loop {
-        match lock.read(&mut byte) {
+        match read_stdin_byte(&mut byte) {
             Ok(0) => break, // EOF: last line may lack a newline
             Ok(_) => {
                 buf.push(byte[0]);
@@ -1182,6 +1163,32 @@ fn read_password_stdin() -> Result<Zeroizing<String>> {
         bail!("no password provided on stdin");
     }
     Ok(Zeroizing::new(pw.to_string()))
+}
+
+/// Read one byte from stdin without the libc/std buffering layer. This
+/// matters for `run --password-stdin`: anything the buffered reader pulled
+/// in eagerly would be lost when envp execs the target (the target inherits
+/// fd 0). Raw read(2) leaves the rest of the pipe for the application.
+#[cfg(unix)]
+fn read_stdin_byte(byte: &mut [u8; 1]) -> std::io::Result<usize> {
+    loop {
+        // SAFETY: `byte` is a valid one-byte writable buffer and fd 0 is the
+        // process's stdin; read(2) writes at most the given length.
+        let n = unsafe { libc::read(libc::STDIN_FILENO, byte.as_mut_ptr().cast(), 1) };
+        if n >= 0 {
+            return Ok(n as usize);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn read_stdin_byte(byte: &mut [u8; 1]) -> std::io::Result<usize> {
+    use std::io::Read as _;
+    std::io::stdin().lock().read(byte)
 }
 
 /// `envp list`

@@ -8,7 +8,7 @@
 //! - `envp edit <name>`                                            edit variables in $EDITOR
 //! - `envp fpm-snippet <name>`                                     php-fpm pool env[...] lines
 //! - `envp diff <a> <b>`                                           compare two profiles (masked)
-//! - `envp run <name> [options] <command> [args...]`                run with the variables injected
+//! - `envp run <name> [options] <command> [args...]`                exec with the variables injected (unix)
 //! - `envp list / rm / cp / rename / passwd / unlock / lock`        profile management
 //!
 //! Every decrypting command obtains the password via one of the global
@@ -27,8 +27,6 @@ mod fuzz_tests;
 mod keycache;
 mod mask;
 mod profile;
-#[cfg(unix)]
-mod signals;
 
 use std::path::PathBuf;
 
@@ -154,9 +152,9 @@ enum Commands {
         /// Start the command detached in a new session; envp exits immediately
         #[arg(long)]
         detach: bool,
-        /// Keep core dumps enabled for the child (RLIMIT_CORE inherited from
-        /// the supervisor, e.g. systemd LimitCORE=); core dumps are disabled
-        /// by default
+        /// Keep core dumps enabled for the command (RLIMIT_CORE inherited
+        /// from the supervisor, e.g. systemd LimitCORE=); core dumps are
+        /// disabled by default
         #[arg(long)]
         allow_core_dumps: bool,
         /// Command and arguments to execute (everything after it is passed through;
@@ -258,7 +256,8 @@ fn main() {
 }
 
 /// Exit codes (spec §3): 0 success, 1 envp error, 2 usage error (clap default).
-/// `run` forwards the child's exit code 1:1.
+/// On unix, `run` execs the target, so the target's own exit status is the
+/// result; the other paths return envp's codes.
 fn dispatch(password_stdin: bool, password_file: Option<PathBuf>, command: Commands) -> i32 {
     let mut input = match commands::PasswordInput::from_flags(password_stdin, password_file) {
         Ok(i) => i,

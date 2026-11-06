@@ -4,6 +4,9 @@
 //! profile name, and outcome — **never variable keys or values** (spec:
 //! smallest possible secret propagation surface). Written best-effort: a
 //! failed audit write warns on stderr but never fails the command itself.
+//!
+//! `run` on unix writes `exec` immediately before replacing its image; the
+//! target's exit code is no longer observable by envp at that point.
 
 use std::io::Write;
 
