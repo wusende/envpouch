@@ -33,6 +33,16 @@ impl EnvVars {
         self.0.iter()
     }
 
+    /// Insert or replace one variable; returns true when the key already existed.
+    pub fn insert(&mut self, key: String, value: String) -> bool {
+        self.0.insert(key, value).is_some()
+    }
+
+    /// Remove one variable; returns true when the key existed.
+    pub fn remove(&mut self, key: &str) -> bool {
+        self.0.remove(key).is_some()
+    }
+
     /// Parse a .env file with dotenvy (supports comments, `export` prefix,
     /// quotes, multi-line values).
     /// Note: `$VAR` references in values are expanded by dotenvy (consistent

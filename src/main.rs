@@ -98,6 +98,22 @@ enum Commands {
         /// Profile name
         name: String,
     },
+    /// Add or replace variables (KEY=value; a bare KEY prompts with hidden input)
+    Set {
+        /// Profile name
+        name: String,
+        /// KEY=value assignments; a bare KEY asks for the value without echo
+        #[arg(required = true, value_name = "ASSIGNMENT")]
+        assignments: Vec<String>,
+    },
+    /// Remove variables from a profile
+    Unset {
+        /// Profile name
+        name: String,
+        /// Variable names to remove
+        #[arg(required = true, value_name = "KEY")]
+        keys: Vec<String>,
+    },
     /// Emit php-fpm pool env[...] lines for a profile (stdout)
     FpmSnippet {
         /// Profile name
@@ -134,6 +150,7 @@ enum Commands {
         command: Vec<String>,
     },
     /// List all profiles (no password required)
+    #[command(visible_alias = "ls")]
     List,
     /// Delete a profile
     Rm {
@@ -174,6 +191,8 @@ impl Commands {
             Commands::Show { name, .. } => ("show", Some(name.clone())),
             Commands::Export { name, .. } => ("export", Some(name.clone())),
             Commands::Edit { name } => ("edit", Some(name.clone())),
+            Commands::Set { name, .. } => ("set", Some(name.clone())),
+            Commands::Unset { name, .. } => ("unset", Some(name.clone())),
             Commands::FpmSnippet { name } => ("fpm-snippet", Some(name.clone())),
             Commands::Diff { name_a, .. } => ("diff", Some(name_a.clone())),
             Commands::Run { name, .. } => ("run", Some(name.clone())),
@@ -216,6 +235,10 @@ fn dispatch(password_stdin: bool, command: Commands) -> i32 {
             commands::export(&name, output, password_stdin).map(|_| 0)
         }
         Commands::Edit { name } => commands::edit(&name, password_stdin).map(|_| 0),
+        Commands::Set { name, assignments } => {
+            commands::set(&name, &assignments, password_stdin).map(|_| 0)
+        }
+        Commands::Unset { name, keys } => commands::unset(&name, &keys, password_stdin).map(|_| 0),
         Commands::FpmSnippet { name } => commands::fpm_snippet(&name, password_stdin).map(|_| 0),
         Commands::Diff { name_a, name_b } => {
             commands::diff(&name_a, &name_b, password_stdin).map(|_| 0)

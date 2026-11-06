@@ -209,6 +209,166 @@ fn validate_stored_keys(vars: &EnvVars) -> Result<()> {
     );
 }
 
+/// Encrypt and atomically write `vars` under an already-verified password.
+/// Fresh salt/nonce per call (see `crypto::encrypt`); shared by
+/// import/set/unset/passwd so every rewrite has the same metadata handling.
+fn save_profile(name: &str, vars: &EnvVars, password: &str) -> Result<()> {
+    let payload = vars.to_json()?;
+    let meta = FileMeta {
+        var_count: vars.len() as u32,
+        updated_at: now_unix()?,
+    };
+    let blob = crypto::encrypt(&payload, password, meta)?;
+    profile::write(name, &blob)
+}
+
+/// One `set` argument after parsing.
+#[derive(Debug)]
+enum Assignment {
+    /// `KEY=VALUE` given on the command line
+    Pair(String, String),
+    /// bare `KEY`: the value is prompted (hidden) after the password is verified
+    Prompt(String),
+}
+
+/// Parse `KEY=VALUE` / bare `KEY` assignments without touching stdin or the
+/// terminal yet: structure errors must fail before any password is requested.
+/// Bare keys are rejected with `--password-stdin` because stdin lines belong to
+/// password prompts (one line per prompt).
+fn parse_assignments(assignments: &[String], password_stdin: bool) -> Result<Vec<Assignment>> {
+    let mut parsed = Vec::with_capacity(assignments.len());
+    for item in assignments {
+        match item.split_once('=') {
+            Some((key, value)) => {
+                envfile::validate_key(key, value)?;
+                parsed.push(Assignment::Pair(key.to_string(), value.to_string()));
+            }
+            None => {
+                envfile::validate_key(item, "")?;
+                if password_stdin {
+                    bail!(
+                        "'{item}' has no value; with --password-stdin write KEY=VALUE \
+                         (stdin is reserved for the password prompts)"
+                    );
+                }
+                parsed.push(Assignment::Prompt(item.to_string()));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+/// Resolve bare keys with a hidden terminal prompt, after the password has
+/// been verified. The value is never echoed and never enters shell history.
+fn resolve_prompted(parsed: Vec<Assignment>) -> Result<Vec<(String, String)>> {
+    let mut pairs = Vec::with_capacity(parsed.len());
+    for item in parsed {
+        match item {
+            Assignment::Pair(key, value) => pairs.push((key, value)),
+            Assignment::Prompt(key) => {
+                let value = rpassword::prompt_password(format!("Value for {key}: "))
+                    .context("cannot read the value from the terminal")?;
+                let value = Zeroizing::new(value);
+                envfile::validate_key(&key, &value)?;
+                pairs.push((key, value.to_string()));
+            }
+        }
+    }
+    Ok(pairs)
+}
+
+/// `envp set <name> KEY=VALUE...` (bare `KEY` prompts for the value).
+///
+/// The password is verified like every other decrypting command; the profile
+/// is then re-encrypted with a fresh salt/nonce. `KEY=VALUE` exposes the value
+/// to `ps`/shell history — use the bare form for secrets.
+pub fn set(name: &str, assignments: &[String], password_stdin: bool) -> Result<()> {
+    profile::validate_name(name)?;
+    if !profile::exists(name)? {
+        bail!(
+            "profile '{name}' does not exist (create it with \
+             `envp import <name> --from <env-file>`)"
+        );
+    }
+    let parsed = parse_assignments(assignments, password_stdin)?;
+
+    let blob = profile::read(name)?;
+    let password = obtain_password(
+        name,
+        password_stdin,
+        &format!("Enter password for profile '{name}': "),
+    )?;
+    let decrypted = crypto::decrypt(&blob, password.as_str())?;
+    let mut vars = EnvVars::from_json(&decrypted.plaintext)?;
+    let pairs = resolve_prompted(parsed)?;
+
+    let (mut added, mut replaced) = (0usize, 0usize);
+    for (key, value) in pairs {
+        if vars.insert(key, value) {
+            replaced += 1;
+        } else {
+            added += 1;
+        }
+    }
+
+    save_profile(name, &vars, password.as_str())?;
+    out_line(format!(
+        "Profile '{name}' updated: {added} added, {replaced} replaced ({} variables)",
+        vars.len()
+    ))
+}
+
+/// `envp unset <name> KEY...`: remove variables; missing keys are reported but
+/// do not fail the command unless nothing at all matched.
+pub fn unset(name: &str, keys: &[String], password_stdin: bool) -> Result<()> {
+    profile::validate_name(name)?;
+    if !profile::exists(name)? {
+        bail!(
+            "profile '{name}' does not exist (create it with \
+             `envp import <name> --from <env-file>`)"
+        );
+    }
+    for key in keys {
+        envfile::validate_key(key, "")?;
+    }
+
+    let blob = profile::read(name)?;
+    let password = obtain_password(
+        name,
+        password_stdin,
+        &format!("Enter password for profile '{name}': "),
+    )?;
+    let decrypted = crypto::decrypt(&blob, password.as_str())?;
+    let mut vars = EnvVars::from_json(&decrypted.plaintext)?;
+
+    let mut removed = 0usize;
+    let mut missing = Vec::new();
+    for key in keys {
+        if vars.remove(key) {
+            removed += 1;
+        } else {
+            missing.push(key.as_str());
+        }
+    }
+
+    if removed == 0 {
+        bail!(
+            "no matching variables in profile '{name}': {}",
+            missing.join(", ")
+        );
+    }
+
+    save_profile(name, &vars, password.as_str())?;
+    out_line(format!(
+        "Profile '{name}' updated: {removed} removed ({} variables)",
+        vars.len()
+    ))?;
+    if !missing.is_empty() {
+        eprintln!("warning: not found: {}", missing.join(", "));
+    }
+    Ok(())
+}
+
 /// Shared import pipeline. `skipped` counts variables excluded by the
 /// exclusion list (--from-env); always 0 for --from.
 fn import_vars(
@@ -249,13 +409,7 @@ fn import_vars(
         eprintln!("warning: no environment variables were imported");
     }
 
-    let payload = vars.to_json()?;
-    let meta = FileMeta {
-        var_count: vars.len() as u32,
-        updated_at: now_unix()?,
-    };
-    let blob = crypto::encrypt(&payload, password.as_str(), meta)?;
-    profile::write(name, &blob)?;
+    save_profile(name, &vars, password.as_str())?;
 
     let mut out = String::new();
     let _ = writeln!(
@@ -966,13 +1120,7 @@ pub fn passwd(name: &str, password_stdin: bool) -> Result<()> {
     let vars = EnvVars::from_json(&decrypted.plaintext)?;
 
     let new = new_password(password_stdin)?;
-    let payload = vars.to_json()?;
-    let meta = FileMeta {
-        var_count: vars.len() as u32,
-        updated_at: now_unix()?,
-    };
-    let new_blob = crypto::encrypt(&payload, new.as_str(), meta)?;
-    profile::write(name, &new_blob)?;
+    save_profile(name, &vars, new.as_str())?;
     let _ = keycache::clear(name);
     out_line(format!("Password changed for profile '{name}'"))
 }
@@ -1039,6 +1187,36 @@ mod tests {
         assert_eq!(fpm_line("KEY", "a\\b"), "env[KEY] = \"a\\\\b\"");
         assert_eq!(fpm_line("KEY", "a;b#c"), "env[KEY] = \"a;b#c\"");
         assert_eq!(fpm_line("KEY", "it's $HOME"), "env[KEY] = it's $HOME");
+    }
+
+    #[test]
+    fn set_assignments_split_on_first_equals() {
+        let parsed = parse_assignments(&["A=1".into(), "B=x=y".into()], true).expect("parses");
+        assert_eq!(parsed.len(), 2);
+        match &parsed[0] {
+            Assignment::Pair(k, v) => assert_eq!((k.as_str(), v.as_str()), ("A", "1")),
+            Assignment::Prompt(_) => panic!("A=1 must not prompt"),
+        }
+        match &parsed[1] {
+            Assignment::Pair(k, v) => assert_eq!((k.as_str(), v.as_str()), ("B", "x=y")),
+            Assignment::Prompt(_) => panic!("B=x=y must not prompt"),
+        }
+    }
+
+    #[test]
+    fn set_bare_key_prompts_only_without_password_stdin() {
+        let parsed = parse_assignments(&["TOKEN".into()], false).expect("parses");
+        assert!(matches!(parsed.as_slice(), [Assignment::Prompt(k)] if k == "TOKEN"));
+        let err = parse_assignments(&["TOKEN".into()], true).expect_err("rejected");
+        assert!(err.to_string().contains("KEY=VALUE"), "{err}");
+    }
+
+    #[test]
+    fn set_rejects_invalid_keys_before_prompting() {
+        let err = parse_assignments(&["BAD KEY=1".into()], true).expect_err("rejected");
+        assert!(err.to_string().contains("invalid variable name"), "{err}");
+        let err = parse_assignments(&["9LIVES=1".into()], true).expect_err("rejected");
+        assert!(err.to_string().contains("invalid variable name"), "{err}");
     }
 
     #[test]

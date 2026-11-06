@@ -85,10 +85,12 @@ start.
 | `envp show <name> [--reveal]` | Show variables (masked by default) | yes |
 | `envp export <name> [-o <file>]` | Export as .env text (stdout without `-o`) | yes |
 | `envp edit <name>` | Edit variables in `$EDITOR` (default `vi`) | yes |
+| `envp set <name> KEY=VALUE...` (bare `KEY` prompts, hidden) | Add or replace variables | yes |
+| `envp unset <name> KEY...` | Remove variables | yes |
 | `envp fpm-snippet <name>` | Emit php-fpm pool `env[...]` lines | yes |
 | `envp diff <a> <b>` | Compare two profiles (masked values) | yes |
 | `envp run <name> [--clean] [--dry-run] [--detach] -- <cmd> [args...]` | Run a command with the variables injected | yes |
-| `envp list` | List profiles | no |
+| `envp list` (alias: `envp ls`) | List profiles | no |
 | `envp rm <name>` | Delete a profile | no |
 | `envp passwd <name>` | Change the profile password | yes |
 | `envp unlock <name> [--ttl <seconds>]` | Verify + cache the password in the OS keychain (default TTL 900 s) | yes |
@@ -118,6 +120,21 @@ line per prompt, in prompt order (`passwd` reads two lines: current then new;
   `.env` file. envp prints a note on import when values contain `$`.
 - **Export text is normalized**: key order (alphabetical) and quoting differ
   from the source file; the key/value semantics are preserved exactly.
+
+### Set / unset
+
+- `envp set prod API_KEY=... LOG_LEVEL=debug` adds new keys and replaces
+  same-name keys. Keys must match `[A-Za-z_][A-Za-z0-9_]*`.
+- `KEY=VALUE` on the command line is visible to same-user processes (`ps`) and
+  is stored in shell history — fine for non-secrets. For a secret, pass the
+  bare key: `envp set prod API_KEY` verifies the profile password first, then
+  reads the value with hidden input (never echoed, never in history).
+- With `--password-stdin` the `KEY=VALUE` form is required: stdin lines belong
+  to the password prompts, so there is no line left for a value.
+- `envp unset prod OLD_TOKEN OLD_URL` removes keys. Unknown keys are reported
+  as a warning; the command fails only when nothing matched at all.
+- Both commands re-encrypt the profile atomically (fresh salt/nonce); the
+  password is unchanged. For bulk changes use `envp edit`.
 
 ### Run
 
