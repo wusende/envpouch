@@ -5,9 +5,9 @@
 # in-process deterministic fuzz suite (src/fuzz_tests.rs), which covers the
 # pure functions; this script covers process-level behavior.
 #
-# Usage: scripts/fuzz_cli.sh [path-to-envpouch-binary]
+# Usage: scripts/fuzz_cli.sh [path-to-envp-binary]
 set -u
-BIN="${1:-./target/release/envpouch}"
+BIN="${1:-./target/release/envp}"
 PASS="fuzzcli-pass-123"
 WORK="$(mktemp -d)"
 PROFILES="$HOME/.envpouch/profiles"

@@ -1,7 +1,7 @@
 {
   "name": "envpouch",
   "version": "0.1.0",
-  "description": "Encrypted environment variable profile manager: import, export and run with password-protected profiles.",
+  "description": "Encrypted environment variable profile manager: import, export and run with password-protected profiles. Command: `envp`.",
   "license": "MIT",
   "author": "wusende",
   "homepage": "https://github.com/wusende/envpouch#readme",
@@ -22,10 +22,13 @@
     "profile"
   ],
   "bin": {
-    "envpouch": "bin/envpouch.js"
+    "envp": "bin/envp.js"
+  },
+  "scripts": {
+    "postinstall": "node bin/postinstall.js"
   },
   "files": [
-    "bin/envpouch.js",
+    "bin/",
     "vendor/"
   ],
   "engines": {

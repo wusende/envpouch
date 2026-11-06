@@ -78,7 +78,7 @@ fn now_unix() -> Result<u64> {
         .as_secs())
 }
 
-/// Write bytes to stdout. Rust ignores SIGPIPE, so a closed pipe (`envpouch
+/// Write bytes to stdout. Rust ignores SIGPIPE, so a closed pipe (`envp
 /// export dev | head`) surfaces as EPIPE here; treat it as a clean exit
 /// instead of panicking (review fix).
 pub(crate) fn write_stdout(bytes: &[u8]) -> Result<()> {
@@ -277,7 +277,7 @@ fn import_vars(
     Ok(())
 }
 
-/// `envpouch show <name> [--reveal]`
+/// `envp show <name> [--reveal]`
 pub fn show(name: &str, reveal: bool, password_stdin: bool) -> Result<()> {
     profile::validate_name(name)?;
     let blob = profile::read(name)?;
@@ -302,7 +302,7 @@ pub fn show(name: &str, reveal: bool, password_stdin: bool) -> Result<()> {
     Ok(())
 }
 
-/// `envpouch export <name> [-o <file>]`
+/// `envp export <name> [-o <file>]`
 pub fn export(name: &str, output: Option<PathBuf>, password_stdin: bool) -> Result<()> {
     profile::validate_name(name)?;
     let blob = profile::read(name)?;
@@ -331,7 +331,7 @@ pub fn export(name: &str, output: Option<PathBuf>, password_stdin: bool) -> Resu
     Ok(())
 }
 
-/// `envpouch edit <name>` (spec §5.3): decrypt into a 0600 temp file, open
+/// `envp edit <name>` (spec §5.3): decrypt into a 0600 temp file, open
 /// $EDITOR (default vi), parse back, re-encrypt atomically.
 pub fn edit(name: &str, password_stdin: bool) -> Result<()> {
     profile::validate_name(name)?;
@@ -449,7 +449,7 @@ fn cleanup_edit_leftovers_in(dir: &Path, stale_after: std::time::Duration) {
     }
 }
 
-/// `envpouch fpm-snippet <name>` (spec §4.7): emit php-fpm pool `env[...]`
+/// `envp fpm-snippet <name>` (spec §4.7): emit php-fpm pool `env[...]`
 /// lines on stdout.
 pub fn fpm_snippet(name: &str, password_stdin: bool) -> Result<()> {
     profile::validate_name(name)?;
@@ -509,7 +509,7 @@ pub(crate) fn fpm_line(key: &str, value: &str) -> String {
     format!("env[{key}] = {v}")
 }
 
-/// `envpouch diff <a> <b>` (spec §9 M4): show key-level differences with
+/// `envp diff <a> <b>` (spec §9 M4): show key-level differences with
 /// masked values.
 pub fn diff(name_a: &str, name_b: &str, password_stdin: bool) -> Result<()> {
     profile::validate_name(name_a)?;
@@ -586,15 +586,15 @@ pub fn diff(name_a: &str, name_b: &str, password_stdin: bool) -> Result<()> {
     write_stdout(out.as_bytes())
 }
 
-/// `envpouch run <name> [--clean] [--dry-run] [--detach] -- <cmd> [args...]`
+/// `envp run <name> [--clean] [--dry-run] [--detach] -- <cmd> [args...]`
 /// (`--password-stdin` is a global flag, usable with this and every other
 /// password-requiring command)
 ///
 /// Returns the child exit code (spec §3): child exit code 1:1, 127 not found,
-/// 126 no execute permission, 128+N killed by signal N, 1 for envpouch errors.
+/// 126 no execute permission, 128+N killed by signal N, 1 for envp errors.
 ///
 /// Process model (spec §4.1, do not change): the child runs in its own
-/// process group (`process_group(0)`), envpouch catches terminal signals and
+/// process group (`process_group(0)`), envp catches terminal signals and
 /// forwards them — the same model as `timeout`/`docker run`. No `sh -c`
 /// wrapping: the target program is exec'd directly.
 #[allow(clippy::too_many_arguments)]
@@ -641,7 +641,7 @@ pub fn run(
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // Own process group: terminal-generated signals reach envpouch only and
+        // Own process group: terminal-generated signals reach envp only and
         // are forwarded explicitly (spec §4.1-§4.2).
         cmd.process_group(0);
         // Best-effort: disable core dumps for the child to shrink the leak
@@ -660,7 +660,7 @@ pub fn run(
             });
         }
         if detach {
-            // Spec §4.5 (P2): nohup-style detachment — new session, envpouch
+            // Spec §4.5 (P2): nohup-style detachment — new session, envp
             // exits immediately after spawn. setsid is async-signal-safe.
             unsafe {
                 cmd.pre_exec(|| {
@@ -673,7 +673,7 @@ pub fn run(
 
     // Install forwarders after password entry so password stdin reads are
     // undisturbed and no signal gets lost before the child exists. Not needed
-    // for --detach (envpouch exits immediately).
+    // for --detach (envp exits immediately).
     if !detach {
         #[cfg(unix)]
         signals::install();
@@ -704,9 +704,9 @@ pub fn run(
         let pid = child.id();
         drop(child);
         // unix: the orphaned child is reaped by launchd/init and survives
-        // (setsid'd into its own session); windows: child outlives envpouch too
+        // (setsid'd into its own session); windows: child outlives envp too
         return out_line(format!(
-            "Detached: pid {pid} (envpouch exits; stdout/stderr still go to this terminal)"
+            "Detached: pid {pid} (envp exits; stdout/stderr still go to this terminal)"
         ))
         .map(|()| 0);
     }
@@ -717,7 +717,7 @@ pub fn run(
         // Polling loop (spec §4.2): 10 ms interval, negligible CPU cost.
         // SIGTERM does NOT reach the child automatically (the terminal only
         // signals the foreground group), so explicit forwarding is mandatory.
-        // On SIGTSTP envpouch keeps running and polls (spec §4.2).
+        // On SIGTSTP envp keeps running and polls (spec §4.2).
         loop {
             if let Some(status) = child.try_wait()? {
                 return Ok(exit_code_of(&status));
@@ -908,14 +908,12 @@ fn read_password_stdin() -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(pw.to_string()))
 }
 
-/// `envpouch list`
+/// `envp list`
 pub fn list() -> Result<()> {
     let profiles = profile::list()?;
     let mut out = String::new();
     if profiles.is_empty() {
-        out.push_str(
-            "No profiles yet. Create one with: envpouch import <name> --from <env-file>\n",
-        );
+        out.push_str("No profiles yet. Create one with: envp import <name> --from <env-file>\n");
         return write_stdout(out.as_bytes());
     }
     let _ = writeln!(out, "{:<20} {:>8}  Updated", "Name", "Vars");
@@ -935,11 +933,11 @@ pub fn list() -> Result<()> {
     write_stdout(out.as_bytes())
 }
 
-/// `envpouch rm <name>`
+/// `envp rm <name>`
 pub fn rm(name: &str) -> Result<()> {
     profile::validate_name(name)?;
     if !profile::exists(name)? {
-        bail!("profile '{name}' does not exist (see `envpouch list`)");
+        bail!("profile '{name}' does not exist (see `envp list`)");
     }
     eprint!("Delete profile '{name}'? [y/N] ");
     std::io::stderr().flush()?;
@@ -953,7 +951,7 @@ pub fn rm(name: &str) -> Result<()> {
     out_line(format!("Profile '{name}' deleted"))
 }
 
-/// `envpouch passwd <name>`: decrypt with the current password, re-encrypt with
+/// `envp passwd <name>`: decrypt with the current password, re-encrypt with
 /// a new one (v1 format unchanged; fresh salt/nonce per write). A cached
 /// keychain entry for the old password becomes stale — remove it.
 pub fn passwd(name: &str, password_stdin: bool) -> Result<()> {
@@ -979,7 +977,7 @@ pub fn passwd(name: &str, password_stdin: bool) -> Result<()> {
     out_line(format!("Password changed for profile '{name}'"))
 }
 
-/// `envpouch unlock <name> [--ttl <seconds>]` (spec §4.3): verify the password,
+/// `envp unlock <name> [--ttl <seconds>]` (spec §4.3): verify the password,
 /// then cache it in the OS keychain. On keychain failure, degrade to a
 /// warning instead of hard-failing (SSH sessions without GUI access).
 pub fn unlock(name: &str, ttl: u64, password_stdin: bool) -> Result<()> {
@@ -1013,7 +1011,7 @@ pub fn unlock(name: &str, ttl: u64, password_stdin: bool) -> Result<()> {
     }
 }
 
-/// `envpouch lock <name>`: remove the cached keychain entry.
+/// `envp lock <name>`: remove the cached keychain entry.
 pub fn lock(name: &str) -> Result<()> {
     profile::validate_name(name)?;
     let _ = keycache::clear(name);

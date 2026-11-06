@@ -44,7 +44,7 @@ jobs:
         run: |
           bash -n scripts/npm-pack.sh
           bash -n scripts/npm-publish.sh
-          node --check npm/envpouch/bin/envpouch.js
+          node --check npm/envpouch/bin/envp.js
           node -e "JSON.parse(require('node:fs').readFileSync('npm/envpouch/package.json', 'utf8'))"
       # The tracked launcher manifest is committed, so a release commit that bumps
       # Cargo.toml but not it would publish a correct version while leaving the

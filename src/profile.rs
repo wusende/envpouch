@@ -74,7 +74,7 @@ fn set_permissions(path: &Path, mode: u32) -> Result<()> {
 /// Atomically write a profile (temp file + rename). Mode 0600 on unix.
 pub fn write(name: &str, blob: &[u8]) -> Result<()> {
     let path = profile_path(name)?;
-    // Unique per-process temp name: two concurrent envpouch processes writing
+    // Unique per-process temp name: two concurrent envp processes writing
     // the same profile must not clobber each other's temp file (review fix)
     let tmp = path.with_extension(format!("{PROFILE_EXT}.{}.tmp", std::process::id()));
     {
@@ -94,7 +94,7 @@ pub fn write(name: &str, blob: &[u8]) -> Result<()> {
 pub fn read(name: &str) -> Result<Vec<u8>> {
     let path = profile_path(name)?;
     if !path.exists() {
-        bail!("profile '{name}' does not exist (see `envpouch list`)");
+        bail!("profile '{name}' does not exist (see `envp list`)");
     }
     fs::read(&path).with_context(|| format!("failed to read profile: {}", path.display()))
 }
@@ -102,7 +102,7 @@ pub fn read(name: &str) -> Result<Vec<u8>> {
 pub fn delete(name: &str) -> Result<()> {
     let path = profile_path(name)?;
     if !path.exists() {
-        bail!("profile '{name}' does not exist (see `envpouch list`)");
+        bail!("profile '{name}' does not exist (see `envp list`)");
     }
     fs::remove_file(&path)
         .with_context(|| format!("failed to delete profile file: {}", path.display()))

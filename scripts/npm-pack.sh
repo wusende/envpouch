@@ -2,8 +2,8 @@
 # Stage the single npm package under npm/dist/envpouch.
 #
 # Every platform's binary is bundled in vendor/, so installing needs only the
-# npm registry (and its mirrors) — no GitHub, no postinstall, no network at
-# install time. The trade-off is a ~7 MB tarball, paid by everyone, to avoid a
+# npm registry (and its mirrors) — no GitHub, no network at install time. The
+# only postinstall script prints the command name (`envp`). The trade-off is a ~7 MB tarball, paid by everyone, to avoid a
 # download step that is unreachable behind the GFW.
 #
 #   scripts/npm-pack.sh                        # fetch assets from GitHub Releases
@@ -70,10 +70,10 @@ mkdir -p "$dist/envpouch/vendor"
 # and macOS ships one universal2 binary for both architectures.
 # vendor dir | release asset | binary name | rust targets packed inside
 platforms=(
-  "linux-x64|envpouch-x86_64-unknown-linux-gnu.tar.gz|envpouch|x86_64-unknown-linux-gnu"
-  "linux-arm64|envpouch-aarch64-unknown-linux-gnu.tar.gz|envpouch|aarch64-unknown-linux-gnu"
-  "darwin-universal|envpouch-universal2-apple-darwin.tar.gz|envpouch|universal2-apple-darwin"
-  "win32-x64|envpouch-x86_64-pc-windows-msvc.zip|envpouch.exe|x86_64-pc-windows-msvc"
+  "linux-x64|envpouch-x86_64-unknown-linux-gnu.tar.gz|envp|x86_64-unknown-linux-gnu"
+  "linux-arm64|envpouch-aarch64-unknown-linux-gnu.tar.gz|envp|aarch64-unknown-linux-gnu"
+  "darwin-universal|envpouch-universal2-apple-darwin.tar.gz|envp|universal2-apple-darwin"
+  "win32-x64|envpouch-x86_64-pc-windows-msvc.zip|envp.exe|x86_64-pc-windows-msvc"
 )
 
 extract() {
@@ -139,8 +139,13 @@ for entry in "${platforms[@]}"; do
       ;;
     release)
       base="https://github.com/wusende/envpouch/releases/download/v$version"
-      curl -fsSL --retry 3 --retry-delay 2 -o "$tmp/$asset" "$base/$asset"
-      curl -fsSL --retry 3 --retry-delay 2 -o "$tmp/$asset.sha256" "$base/$asset.sha256"
+      # --retry-all-errors: through a proxy, curl (35) "TLS connect ... unexpected
+      # eof" is a transient handshake failure, not a 4xx/5xx, so plain --retry
+      # never retries it.
+      curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+        -o "$tmp/$asset" "$base/$asset"
+      curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+        -o "$tmp/$asset.sha256" "$base/$asset.sha256"
 
       expected=$(cut -d' ' -f1 "$tmp/$asset.sha256" | tr -d '[:space:]' | tr 'A-Z' 'a-z')
       actual=$(checksum "$tmp/$asset")
@@ -154,7 +159,7 @@ for entry in "${platforms[@]}"; do
       ;;
   esac
 
-  [ "$bin" = "envpouch.exe" ] || chmod 755 "$dest/$bin"
+  [ "$bin" = "envp.exe" ] || chmod 755 "$dest/$bin"
 done
 
 # The launcher package itself: manifest + bin from npm/envpouch, README/LICENSE
@@ -194,13 +199,15 @@ NPM_DIST=$dist NPM_VERSION=$version NPM_ALLOW_PARTIAL=$([ "$partial" = true ] &&
   if (pkg.name !== "envpouch") problems.push(`package.json says ${pkg.name}`);
   if (pkg.version !== version) problems.push(`version ${pkg.version} != ${version}`);
   if (pkg.optionalDependencies) problems.push("optionalDependencies must be empty (binaries are bundled)");
-  if (!fs.existsSync(path.join(pkgDir, "bin", "envpouch.js"))) problems.push("bin/envpouch.js is missing");
+  if (!fs.existsSync(path.join(pkgDir, "bin", "envp.js"))) problems.push("bin/envp.js is missing");
+  if (pkg.bin?.envp !== "bin/envp.js") problems.push("bin.envp must point at bin/envp.js");
+  if (Object.keys(pkg.bin ?? {}).length !== 1) problems.push(`unexpected bin names: ${Object.keys(pkg.bin)}`);
 
   const expected = [
-    ["linux-x64", "envpouch"],
-    ["linux-arm64", "envpouch"],
-    ["darwin-universal", "envpouch"],
-    ["win32-x64", "envpouch.exe"],
+    ["linux-x64", "envp"],
+    ["linux-arm64", "envp"],
+    ["darwin-universal", "envp"],
+    ["win32-x64", "envp.exe"],
   ];
   const present = [];
   let total = 0;

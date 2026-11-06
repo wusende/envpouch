@@ -1,5 +1,8 @@
 # envpouch
 
+**The project/package is `envpouch`; the command you run is `envp`.**
+Installing gives you `envp` on your `PATH` — there is no `envpouch` command.
+
 [![CI](https://github.com/wusende/envpouch/actions/workflows/ci.yml/badge.svg)](https://github.com/wusende/envpouch/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/envpouch.svg)](https://crates.io/crates/envpouch)
 [![npm](https://img.shields.io/npm/v/envpouch.svg)](https://www.npmjs.com/package/envpouch)
@@ -14,12 +17,12 @@ edit them, or — the main use case — run any program with those variables
 injected:
 
 ```sh
-envpouch import prod --from .env.production
-envpouch run prod -- ./start-server.sh
+envp import prod --from .env.production
+envp run prod -- ./start-server.sh
 ```
 
 Every decrypting command obtains the password via the interactive prompt, the
-OS keychain cache (`envpouch unlock`), or the global `--password-stdin` flag
+OS keychain cache (`envp unlock`), or the global `--password-stdin` flag
 for scripts/CI (see [Scripts / CI](#scripts--ci)).
 
 ## Install / build
@@ -31,49 +34,66 @@ npm install -g envpouch     # prebuilt binary, no toolchain
 cargo install envpouch      # from crates.io, needs a Rust toolchain
 ```
 
+Both installers put the **`envp`** command on your `PATH` (the package name is
+`envpouch`, the binary is `envp`). The npm package's
+postinstall writes a reminder naming the command straight to the terminal.
+`cargo install` has no post-install hook, so it only prints cargo's own lines —
+look for `Installing .../bin/envp` and
+
+```text
+Installed package `envpouch v0.1.0` (executable `envp`)
+```
+
+That line is the authoritative "the command is `envp`" for cargo users; the
+same sentence is the first line of this README and of the crate description on
+crates.io.
+
 Prebuilt binaries are also on
 [Releases](https://github.com/wusende/envpouch/releases) — Linux (amd64,
 glibc 2.35+; arm64, glibc 2.39+), macOS (universal2), Windows (amd64) — put
-one on your `PATH`. The npm package is a thin launcher around that same
-binary; musl/Alpine and Windows arm64 are not covered, use `cargo install`
-there.
+the `envp` executable (`envp.exe` on Windows) on your `PATH`. The npm package
+is a thin launcher around that same binary; musl/Alpine and Windows arm64 are
+not covered, use `cargo install` there.
 
 `cargo install` lands in `~/.cargo/bin`, which sudo can't see. So if you later
-run `sudo envpouch run prod -- ...`, use `sudo ~/.cargo/bin/envpouch ...`.
+run `sudo envp run prod -- ...`, use `sudo ~/.cargo/bin/envp ...`.
 
 From a checkout (requires Rust 1.85+, edition 2024):
 
 ```sh
 cargo install --path .    # installs to ~/.cargo/bin (usually already on PATH)
 # or just build locally:
-cargo build --release     # binary at ./target/release/envpouch
+cargo build --release     # binary at ./target/release/envp
 cargo test --release
 ```
 
 After installing, verify with:
 
 ```sh
-envpouch --version
-envpouch list               # first run prints how to create a profile
+envp --version          # envp 0.1.0
+envp list               # first run prints how to create a profile
 ```
+
+`envp` on its own (or `envp --help`) prints the command list plus a quick
+start.
 
 ## Command reference
 
 | Command | Purpose | Password? |
 |---|---|---|
-| `envpouch import <name> (--from <file> \| --from-env) [--merge]` | Import variables into an encrypted profile | yes |
-| `envpouch show <name> [--reveal]` | Show variables (masked by default) | yes |
-| `envpouch export <name> [-o <file>]` | Export as .env text (stdout without `-o`) | yes |
-| `envpouch edit <name>` | Edit variables in `$EDITOR` (default `vi`) | yes |
-| `envpouch fpm-snippet <name>` | Emit php-fpm pool `env[...]` lines | yes |
-| `envpouch diff <a> <b>` | Compare two profiles (masked values) | yes |
-| `envpouch run <name> [--clean] [--dry-run] [--detach] -- <cmd> [args...]` | Run a command with the variables injected | yes |
-| `envpouch list` | List profiles | no |
-| `envpouch rm <name>` | Delete a profile | no |
-| `envpouch passwd <name>` | Change the profile password | yes |
-| `envpouch unlock <name> [--ttl <seconds>]` | Verify + cache the password in the OS keychain (default TTL 900 s) | yes |
-| `envpouch lock <name>` | Remove the cached keychain entry | no |
-| `envpouch complete --shell <bash\|zsh\|fish\|...>` | Print shell completion script | no |
+| `envp import <name> (--from <file> \| --from-env) [--merge]` | Import variables into an encrypted profile | yes |
+| `envp show <name> [--reveal]` | Show variables (masked by default) | yes |
+| `envp export <name> [-o <file>]` | Export as .env text (stdout without `-o`) | yes |
+| `envp edit <name>` | Edit variables in `$EDITOR` (default `vi`) | yes |
+| `envp fpm-snippet <name>` | Emit php-fpm pool `env[...]` lines | yes |
+| `envp diff <a> <b>` | Compare two profiles (masked values) | yes |
+| `envp run <name> [--clean] [--dry-run] [--detach] -- <cmd> [args...]` | Run a command with the variables injected | yes |
+| `envp list` | List profiles | no |
+| `envp rm <name>` | Delete a profile | no |
+| `envp passwd <name>` | Change the profile password | yes |
+| `envp unlock <name> [--ttl <seconds>]` | Verify + cache the password in the OS keychain (default TTL 900 s) | yes |
+| `envp lock <name>` | Remove the cached keychain entry | no |
+| `envp complete --shell <bash\|zsh\|fish\|...>` | Print shell completion script | no |
 
 **Global flag**: `--password-stdin` works with every password-requiring
 command, before or after the subcommand. Passwords are read from stdin, one
@@ -95,7 +115,7 @@ line per prompt, in prompt order (`passwd` reads two lines: current then new;
   are expanded at import time (against earlier definitions and the actual
   environment); single-quoted values are stored literally. If a value looks
   like `SECRET_TOKEN=pa$$w0rd`, write it as `SECRET_TOKEN='pa$$w0rd'` in your
-  `.env` file. envpouch prints a note on import when values contain `$`.
+  `.env` file. envp prints a note on import when values contain `$`.
 - **Export text is normalized**: key order (alphabetical) and quoting differ
   from the source file; the key/value semantics are preserved exactly.
 
@@ -111,25 +131,25 @@ line per prompt, in prompt order (`passwd` reads two lines: current then new;
 - **`--dry-run`**: prints the command, mode, injected key names (never
   values) and an environment-size estimate; executes nothing.
 - **`--detach`**: starts the command detached and exits immediately; the
-  child keeps running after envpouch exits (unix: new session via `setsid`;
+  child keeps running after envp exits (unix: new session via `setsid`;
   Windows: child naturally outlives the parent).
 - **Exit codes** (a stable interface for scripts):
 
   | Code | Meaning |
   |---|---|
   | 0 | success |
-  | 1 | envpouch error (decryption, I/O, bad usage of args) |
+  | 1 | envp error (decryption, I/O, bad usage of args) |
   | 2 | usage error (clap) |
   | 126 | target has no execute permission (unix) |
   | 127 | target not found |
   | 128+N | child killed by signal N (Ctrl-C → 130) (unix) |
   | other | child's own exit code, passed through 1:1 |
 
-  **Unix**: terminal signals (Ctrl-C, etc.) are caught by envpouch and
+  **Unix**: terminal signals (Ctrl-C, etc.) are caught by envp and
   forwarded to the child's process group — the same model as
   `timeout`/`docker run` — and the child runs with core dumps disabled
   (`RLIMIT_CORE=0`).
-  **Windows**: the child shares envpouch's console group, so Ctrl-C reaches it
+  **Windows**: the child shares envp's console group, so Ctrl-C reaches it
   natively; there is no separate signal-forwarding layer, and the
   process-group/core-dump hardening does not apply.
 
@@ -142,35 +162,35 @@ stdin one line per prompt, in prompt order.
 ```sh
 # feed the password on stdin (first line); avoid ENVPOUCH_PASSPHRASE-style
 # env vars on purpose: /proc/<pid>/environ is readable by same-user processes
-printf '%s\n' "$MY_SECRET_PASSPHRASE" | envpouch run prod --password-stdin -- ./deploy.sh
+printf '%s\n' "$MY_SECRET_PASSPHRASE" | envp run prod --password-stdin -- ./deploy.sh
 
 # the flag may also come before the subcommand, and other commands take it too
-printf '%s\n' "$PW" | envpouch --password-stdin export prod -o /tmp/prod.env
-printf '%s\n' "$PW" | envpouch --password-stdin fpm-snippet prod >> pool.conf
+printf '%s\n' "$PW" | envp --password-stdin export prod -o /tmp/prod.env
+printf '%s\n' "$PW" | envp --password-stdin fpm-snippet prod >> pool.conf
 
 # commands that would prompt twice read two lines, in prompt order:
 #   passwd: current password first, then the new one
-printf '%s\n%s\n' "$OLD_PW" "$NEW_PW" | envpouch passwd prod --password-stdin
+printf '%s\n%s\n' "$OLD_PW" "$NEW_PW" | envp passwd prod --password-stdin
 #   diff: one line per profile (unless the keychain cache answers first)
-printf '%s\n%s\n' "$PW_A" "$PW_B" | envpouch diff a b --password-stdin
+printf '%s\n%s\n' "$PW_A" "$PW_B" | envp diff a b --password-stdin
 
 # creating a profile headless reads the new password once (no confirmation)
-printf '%s\n' "$NEW_PW" | envpouch import prod --from .env.production --password-stdin
+printf '%s\n' "$NEW_PW" | envp import prod --from .env.production --password-stdin
 
 # cache the password in the OS keychain for 15 minutes
-envpouch unlock prod --ttl 900
-envpouch run prod -- ./dev-server.sh          # no prompt
-envpouch lock prod                             # drop it now
+envp unlock prod --ttl 900
+envp run prod -- ./dev-server.sh          # no prompt
+envp lock prod                             # drop it now
 ```
 
 ## PHP-FPM notes
 
-If you wrap `php-fpm` with `envpouch run`, three behaviors bite everyone:
+If you wrap `php-fpm` with `envp run`, three behaviors bite everyone:
 
 1. **`clear_env=yes` (FPM default) wipes the environment for workers.**
-   envpouch's injection only reaches the FPM *master*; `getenv()` in PHP returns
+   envp's injection only reaches the FPM *master*; `getenv()` in PHP returns
    nothing. Fixes, in order of preference:
-   - generate pool lines with `envpouch fpm-snippet prod >> www.conf`
+   - generate pool lines with `envp fpm-snippet prod >> www.conf`
      (adds `env[KEY] = value` per variable), or
    - set `clear_env = no` in the pool so workers inherit the master's
      environment.
@@ -178,9 +198,9 @@ If you wrap `php-fpm` with `envpouch run`, three behaviors bite everyone:
    find no binaries. Add `env[PATH] = ...` manually — `fpm-snippet` reminds
    you in its footer comment.
 3. **`daemonize=yes` (FPM default)**: the master forks into the background
-   and envpouch's direct child exits immediately, so envpouch returns right away.
+   and envp's direct child exits immediately, so envp returns right away.
    **That return is success, not a failure.** With `daemonize = no`
-   (recommended under systemd/containers), envpouch stays in the foreground.
+   (recommended under systemd/containers), envp stays in the foreground.
 
 `fpm-snippet` skips values containing newlines, quotes values containing
 `\ " ; #`, and warns about `$` (variable-reference semantics inside fpm
@@ -209,7 +229,7 @@ accepted via environment variables; `--password-stdin` exists because process
 environments are readable by same-user processes.
 
 **There is no password recovery.** If you lose a profile's password, its data
-is unrecoverable (authenticated encryption has no backdoor). envpouch warns you
+is unrecoverable (authenticated encryption has no backdoor). envp warns you
 when setting a password; keep backups of the password in your password
 manager.
 
@@ -221,13 +241,13 @@ manager.
 
 File format v1: `magic "ENVPOUCH" | version | salt(16B) | argon2 params |
 nonce(12B) | var_count | updated_at | AES-256-GCM ciphertext`. The variable
-count and update time are plaintext metadata so `envpouch list` works without a
+count and update time are plaintext metadata so `envp list` works without a
 password; everything else is ciphertext.
 
 ## Operations
 
 **Storage location override** — for containers, service accounts, or
-multi-instance isolation, point envpouch at a different base directory:
+multi-instance isolation, point envp at a different base directory:
 
 ```sh
 export ENVPOUCH_HOME=/var/lib/myapp/envpouch   # profiles live in $ENVPOUCH_HOME/profiles
@@ -238,7 +258,7 @@ decrypting invocation to `$ENVPOUCH_HOME/audit.log`:
 
 ```sh
 export ENVPOUCH_AUDIT=1
-envpouch run prod -- ./deploy.sh
+envp run prod -- ./deploy.sh
 tail -1 "$HOME/.envpouch/audit.log"    # 2026-11-06T09:12:00+0800	run	prod	exit=0
 ```
 
@@ -249,9 +269,9 @@ write warns on stderr but does not fail the command.
 **Shell completions**:
 
 ```sh
-envpouch complete --shell bash  > ~/.local/share/bash-completion/completions/envpouch
-envpouch complete --shell zsh   > "${fpath[1]}/_envpouch"   # zsh
-envpouch complete --shell fish  > ~/.config/fish/completions/envpouch.fish
+envp complete --shell bash  > ~/.local/share/bash-completion/completions/envp
+envp complete --shell zsh   > "${fpath[1]}/_envp"   # zsh
+envp complete --shell fish  > ~/.config/fish/completions/envp.fish
 ```
 
 **Prebuilt binaries** — tagged releases (`v*`) publish glibc binaries
@@ -273,10 +293,10 @@ recovered from any backup (they are encrypted with the same password).
   editor is open, and cleans up leftovers from killed sessions on the next
   run. `$EDITOR` may carry arguments (e.g. `EDITOR='code --wait'`); it is
   split on whitespace, so an editor path containing spaces cannot be quoted.
-- **Ctrl-Z under `run` (unix)**: Ctrl-Z stops the child, but envpouch itself
+- **Ctrl-Z under `run` (unix)**: Ctrl-Z stops the child, but envp itself
   keeps running and holds the terminal — the shell never sees a stopped job,
   so `fg` cannot resume it. Ctrl-C still works (it kills the stopped child
-  and envpouch exits 130); to resume the child instead, run
+  and envp exits 130); to resume the child instead, run
   `kill -CONT <child-pid>` from another terminal.
 - **Windows differences** (functional but not identical to unix): no
   signal-forwarding layer — Ctrl-C reaches the child natively via the shared
@@ -284,4 +304,4 @@ recovered from any backup (they are encrypted with the same password).
   concept so the `RLIMIT_CORE` hardening does not apply; file modes are NTFS
   ACLs, so the explicit 0600/0700 hardening is a no-op (use ACLs on the
   profile directory if you need per-user restrictions); the keychain cache
-  uses Windows Credential Manager via `envpouch unlock`/`envpouch lock`.
+  uses Windows Credential Manager via `envp unlock`/`envp lock`.

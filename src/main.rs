@@ -1,14 +1,15 @@
 //! envpouch — encrypted environment variable profile manager.
+//! The installed command is `envp` (the package/project is `envpouch`).
 //!
 //! Usage:
-//! - `envpouch import <name> (--from <file> | --from-env) [--merge]`   import into an encrypted profile
-//! - `envpouch show <name> [--reveal]`                                 show variables (masked by default)
-//! - `envpouch export <name> [-o <file>]`                              export as .env (stdout without -o)
-//! - `envpouch edit <name>`                                            edit variables in $EDITOR
-//! - `envpouch fpm-snippet <name>`                                     php-fpm pool env[...] lines
-//! - `envpouch diff <a> <b>`                                           compare two profiles (masked)
-//! - `envpouch run <name> -- <command> [args...]`                      run with the variables injected
-//! - `envpouch list / rm / passwd / unlock / lock`                     profile management
+//! - `envp import <name> (--from <file> | --from-env) [--merge]`   import into an encrypted profile
+//! - `envp show <name> [--reveal]`                                 show variables (masked by default)
+//! - `envp export <name> [-o <file>]`                              export as .env (stdout without -o)
+//! - `envp edit <name>`                                            edit variables in $EDITOR
+//! - `envp fpm-snippet <name>`                                     php-fpm pool env[...] lines
+//! - `envp diff <a> <b>`                                           compare two profiles (masked)
+//! - `envp run <name> -- <command> [args...]`                      run with the variables injected
+//! - `envp list / rm / passwd / unlock / lock`                     profile management
 //!
 //! Every decrypting command obtains the password via the global
 //! `--password-stdin` flag (one stdin line per prompt — scripts/CI), the OS
@@ -33,10 +34,17 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "envpouch",
+    name = "envp",
+    bin_name = "envp",
     version,
-    about = "Encrypted environment variable profile manager",
-    long_about = "Store .env files as encrypted, password-protected profiles (Argon2id + AES-256-GCM),\nexport them, or inject them into child processes. Every import/show/export/run\nrequires the password."
+    about = "Encrypted environment variable profile manager (project: envpouch)",
+    long_about = "Store .env files as encrypted, password-protected profiles (Argon2id + AES-256-GCM),\nexport them, or inject them into child processes. Every import/show/export/run\nrequires the password.\n\nThe project is called envpouch; the command is envp.",
+    after_help = "Quick start:
+  envp import prod --from .env.production   store a .env file as an encrypted profile
+  envp run prod -- ./start-server.sh        run a command with those variables
+  envp list                                 list profiles (no password)
+
+Docs: https://github.com/wusende/envpouch"
 )]
 struct Cli {
     /// Read passwords from stdin (one line per prompt, in prompt order)
@@ -114,7 +122,7 @@ enum Commands {
         /// Print what would be executed without running it (never any values)
         #[arg(long)]
         dry_run: bool,
-        /// Start the command detached in a new session; envpouch exits immediately
+        /// Start the command detached in a new session; envp exits immediately
         #[arg(long)]
         detach: bool,
         /// Command and arguments to execute (separate them with --)
@@ -190,7 +198,7 @@ fn main() {
     }
 }
 
-/// Exit codes (spec §3): 0 success, 1 envpouch error, 2 usage error (clap default).
+/// Exit codes (spec §3): 0 success, 1 envp error, 2 usage error (clap default).
 /// `run` forwards the child's exit code 1:1.
 fn dispatch(password_stdin: bool, command: Commands) -> i32 {
     let result = match command {
@@ -226,7 +234,7 @@ fn dispatch(password_stdin: bool, command: Commands) -> i32 {
         Commands::Lock { name } => commands::lock(&name).map(|_| 0),
         Commands::Complete { shell } => {
             let mut buf = Vec::new();
-            clap_complete::generate(shell, &mut Cli::command(), "envpouch", &mut buf);
+            clap_complete::generate(shell, &mut Cli::command(), "envp", &mut buf);
             commands::write_stdout(&buf).map(|_| 0)
         }
     };

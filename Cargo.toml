@@ -3,7 +3,7 @@ name = "envpouch"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Encrypted environment variable profile manager (import/export/run with password)"
+description = "Encrypted environment variable profile manager (import/export/run with password) — command `envp`"
 exclude = [".github", "scripts", "npm"]
 license = "MIT"
 repository = "https://github.com/wusende/envpouch"
@@ -11,6 +11,11 @@ homepage = "https://github.com/wusende/envpouch"
 readme = "README.md"
 keywords = ["env", "dotenv", "secrets", "encryption", "cli"]
 categories = ["command-line-utilities", "config", "cryptography"]
+
+# The project/package is `envpouch`; the command users type is `envp`.
+[[bin]]
+name = "envp"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

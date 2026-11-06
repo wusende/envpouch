@@ -33,11 +33,11 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target x86_64-unknown-linux-gnu
       - name: Smoke test
-        run: target/x86_64-unknown-linux-gnu/release/envpouch --version
+        run: target/x86_64-unknown-linux-gnu/release/envp --version
       - name: Package
         run: |
           asset=envpouch-x86_64-unknown-linux-gnu
-          tar -C target/x86_64-unknown-linux-gnu/release -czf "$asset.tar.gz" envpouch
+          tar -C target/x86_64-unknown-linux-gnu/release -czf "$asset.tar.gz" envp
           sha256sum "$asset.tar.gz" > "$asset.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
         with:
@@ -61,11 +61,11 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target aarch64-unknown-linux-gnu
       - name: Smoke test
-        run: target/aarch64-unknown-linux-gnu/release/envpouch --version
+        run: target/aarch64-unknown-linux-gnu/release/envp --version
       - name: Package
         run: |
           asset=envpouch-aarch64-unknown-linux-gnu
-          tar -C target/aarch64-unknown-linux-gnu/release -czf "$asset.tar.gz" envpouch
+          tar -C target/aarch64-unknown-linux-gnu/release -czf "$asset.tar.gz" envp
           sha256sum "$asset.tar.gz" > "$asset.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
         with:
@@ -90,16 +90,16 @@ jobs:
       - name: Merge into universal2 binary
         run: |
           lipo -create \
-            target/aarch64-apple-darwin/release/envpouch \
-            target/x86_64-apple-darwin/release/envpouch \
-            -output envpouch
-          chmod +x envpouch
-          file envpouch
-          ./envpouch --version
+            target/aarch64-apple-darwin/release/envp \
+            target/x86_64-apple-darwin/release/envp \
+            -output envp
+          chmod +x envp
+          file envp
+          ./envp --version
       - name: Package
         run: |
           asset=envpouch-universal2-apple-darwin
-          tar -czf "$asset.tar.gz" envpouch
+          tar -czf "$asset.tar.gz" envp
           shasum -a 256 "$asset.tar.gz" > "$asset.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
         with:
@@ -118,12 +118,12 @@ jobs:
       - name: Build
         run: cargo build --release --locked
       - name: Smoke test
-        run: target/release/envpouch.exe --version
+        run: target/release/envp.exe --version
       - name: Package
         shell: pwsh
         run: |
           $asset = "envpouch-x86_64-pc-windows-msvc"
-          Compress-Archive -Path target/release/envpouch.exe -DestinationPath "$asset.zip"
+          Compress-Archive -Path target/release/envp.exe -DestinationPath "$asset.zip"
           $hash = (Get-FileHash "$asset.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $asset.zip" | Out-File -Encoding ascii "$asset.zip.sha256"
       - uses: actions/upload-artifact@v4

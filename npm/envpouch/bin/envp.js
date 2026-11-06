@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Launcher for the binary bundled under vendor/.
 // Arguments, stdio, signals and the exit code pass straight through, so in a
-// script `envpouch run prod -- ./x` behaves exactly like the native binary.
+// script `envp run prod -- ./x` behaves exactly like the native binary.
 //
 // Every platform ships inside the package (see scripts/npm-pack.sh): installing
-// needs only the npm registry, never GitHub, and runs no install scripts.
+// needs only the npm registry, never GitHub, and no network. The only install
+// script is bin/postinstall.js, which prints the command name (`envp`).
 //
 // Dependency-free CommonJS on purpose: this runs before anything else is
 // installed and must survive every npm/pnpm/yarn node version.
@@ -65,7 +66,7 @@ const BIN = path.join(
   "..",
   "vendor",
   dir,
-  process.platform === "win32" ? "envpouch.exe" : "envpouch",
+  process.platform === "win32" ? "envp.exe" : "envp",
 );
 
 if (!fs.existsSync(BIN)) {

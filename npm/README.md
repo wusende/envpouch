@@ -10,15 +10,19 @@
 ## npm 包的形态
 
 npm 上只有一个包 `envpouch`，里面**内置了 4 个平台的二进制**，启动壳按
-`process.platform` / `process.arch` 选一个执行。
+`process.platform` / `process.arch` 选一个执行。**包名是 `envpouch`，命令是
+`envp`**：`bin` 只声明 `envp`，安装时的 postinstall 会打印这条提示（写
+`/dev/tty` 而不是 stdout——npm 默认 `foreground-scripts=false`，会把脚本输出吞掉；
+没有 tty 时退回 stdout）。
 
 ```
 envpouch/
-├── bin/envpouch.js           启动壳：选平台、透传参数/信号/退出码
-├── vendor/linux-x64/envpouch
-├── vendor/linux-arm64/envpouch
-├── vendor/darwin-universal/envpouch   universal2，两个架构共用
-└── vendor/win32-x64/envpouch.exe
+├── bin/envp.js               启动壳：选平台、透传参数/信号/退出码
+├── bin/postinstall.js        安装后打印「命令是 envp」
+├── vendor/linux-x64/envp
+├── vendor/linux-arm64/envp
+├── vendor/darwin-universal/envp   universal2，两个架构共用
+└── vendor/win32-x64/envp.exe
 ```
 
 Linux 是 glibc 构建（`keyring` 的 Secret Service 后端链接 libdbus-1，没有可用的
@@ -99,7 +103,7 @@ CI 里的 npm job 用本次构建产物（`--from-artifacts`），不依赖 Rele
 cargo build --release
 bash scripts/npm-pack.sh --from-target   # 只 stage 本机已构建的平台
 npm install -g ./npm/dist/envpouch
-envpouch --version
+envp --version
 ```
 
 ## 平台矩阵
