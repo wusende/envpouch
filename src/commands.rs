@@ -37,10 +37,24 @@ fn obtain_password(name: &str, password_stdin: bool, prompt: &str) -> Result<Zer
     prompt_password(prompt)
 }
 
-/// Interactive password setup: type twice to confirm; on mismatch, retry at
-/// most once before giving up (spec §5.1). Prints the lost-password warning.
-fn prompt_new_password() -> Result<Zeroizing<String>> {
+/// New-password setup. Interactive: type twice to confirm with one retry on
+/// mismatch (spec §5.1). With --password-stdin: one line, no confirmation
+/// (scripts cannot re-type; the lost-password warning still prints).
+fn new_password(password_stdin: bool) -> Result<Zeroizing<String>> {
     eprintln!("warning: if you lose this password, the profile cannot be recovered");
+    if password_stdin {
+        let pw = read_password_stdin()?;
+        if pw.as_str().len() < 8 {
+            bail!("password too short (minimum 8 characters)");
+        }
+        return Ok(pw);
+    }
+    prompt_new_password()
+}
+
+/// Interactive password setup: type twice to confirm; on mismatch, retry at
+/// most once before giving up (spec §5.1).
+fn prompt_new_password() -> Result<Zeroizing<String>> {
     const MAX_ATTEMPTS: usize = 2;
     for _attempt in 1..=MAX_ATTEMPTS {
         let pw = prompt_password("Set a new password: ")?;
@@ -54,7 +68,7 @@ fn prompt_new_password() -> Result<Zeroizing<String>> {
         }
         eprintln!("error: passwords do not match");
     }
-    bail!("password setup failed after {MAX_ATTEMPTS} attempts");
+    bail!("password setup failed after {MAX_ATTEMPTS} attempts")
 }
 
 fn now_unix() -> Result<u64> {
@@ -64,7 +78,7 @@ fn now_unix() -> Result<u64> {
         .as_secs())
 }
 
-/// Write bytes to stdout. Rust ignores SIGPIPE, so a closed pipe (`envrun
+/// Write bytes to stdout. Rust ignores SIGPIPE, so a closed pipe (`envpouch
 /// export dev | head`) surfaces as EPIPE here; treat it as a clean exit
 /// instead of panicking (review fix).
 pub(crate) fn write_stdout(bytes: &[u8]) -> Result<()> {
@@ -89,6 +103,7 @@ fn parse_key_list(spec: &str) -> Vec<String> {
 }
 
 /// Entry point for `import` (spec §5.1): exactly one of --from / --from-env.
+#[allow(clippy::too_many_arguments)]
 pub fn import_command(
     name: &str,
     from: Option<PathBuf>,
@@ -96,22 +111,23 @@ pub fn import_command(
     only: Option<String>,
     except: Option<String>,
     merge: bool,
+    password_stdin: bool,
 ) -> Result<()> {
     match (from, from_env) {
-        (Some(f), false) => import_from_file(name, &f, merge),
-        (None, true) => import_from_env(name, only, except, merge),
+        (Some(f), false) => import_from_file(name, &f, merge, password_stdin),
+        (None, true) => import_from_env(name, only, except, merge, password_stdin),
         (Some(_), true) => bail!("--from and --from-env are mutually exclusive"),
         (None, false) => bail!("nothing to import: specify --from <file> or --from-env"),
     }
 }
 
-fn import_from_file(name: &str, from: &Path, merge: bool) -> Result<()> {
+fn import_from_file(name: &str, from: &Path, merge: bool, password_stdin: bool) -> Result<()> {
     if !from.exists() {
         bail!("file not found: {}", from.display());
     }
     let new_vars = EnvVars::parse_file(from)?;
     require_valid_keys(&new_vars)?;
-    import_vars(name, new_vars, merge, 0)
+    import_vars(name, new_vars, merge, 0, password_stdin)
 }
 
 /// `import --from-env`: grab variables from the current process environment.
@@ -122,6 +138,7 @@ fn import_from_env(
     only: Option<String>,
     except: Option<String>,
     merge: bool,
+    password_stdin: bool,
 ) -> Result<()> {
     let only_list = only.as_ref().map(|s| parse_key_list(s));
     let except_list = except.as_ref().map(|s| parse_key_list(s));
@@ -152,7 +169,7 @@ fn import_from_env(
     }
     let vars = EnvVars::from_map(map);
     require_valid_keys(&vars)?;
-    import_vars(name, vars, merge, skipped)
+    import_vars(name, vars, merge, skipped, password_stdin)
 }
 
 /// Fail fast (spec §4.4/§5.1): report every invalid key, then reject the
@@ -174,9 +191,33 @@ fn require_valid_keys(vars: &EnvVars) -> Result<()> {
     );
 }
 
+/// Defensive re-check of stored keys before injection (spec §4.4 trusts
+/// stored data; this only guards against a corrupted/crafted payload turning
+/// into a panic inside `Command::env`). Key names only — never values.
+fn validate_stored_keys(vars: &EnvVars) -> Result<()> {
+    let invalid: Vec<&str> = vars
+        .iter()
+        .filter(|(k, _)| envfile::validate_key(k, "").is_err())
+        .map(|(k, _)| k.as_str())
+        .collect();
+    if invalid.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "profile contains invalid variable name(s): {} (profile may be corrupted)",
+        invalid.join(", ")
+    );
+}
+
 /// Shared import pipeline. `skipped` counts variables excluded by the
 /// exclusion list (--from-env); always 0 for --from.
-fn import_vars(name: &str, new_vars: EnvVars, merge: bool, skipped: usize) -> Result<()> {
+fn import_vars(
+    name: &str,
+    new_vars: EnvVars,
+    merge: bool,
+    skipped: usize,
+    password_stdin: bool,
+) -> Result<()> {
     let existed = profile::exists(name)?;
     if existed && !merge {
         bail!("profile '{name}' already exists (use --merge to merge into it)");
@@ -185,11 +226,11 @@ fn import_vars(name: &str, new_vars: EnvVars, merge: bool, skipped: usize) -> Re
         // Merging must verify the existing password; it stays unchanged
         obtain_password(
             name,
-            false,
+            password_stdin,
             &format!("Enter existing password for profile '{name}': "),
         )?
     } else {
-        prompt_new_password()?
+        new_password(password_stdin)?
     };
 
     let vars = if existed {
@@ -236,13 +277,13 @@ fn import_vars(name: &str, new_vars: EnvVars, merge: bool, skipped: usize) -> Re
     Ok(())
 }
 
-/// `envrun show <name> [--reveal]`
-pub fn show(name: &str, reveal: bool) -> Result<()> {
+/// `envpouch show <name> [--reveal]`
+pub fn show(name: &str, reveal: bool, password_stdin: bool) -> Result<()> {
     profile::validate_name(name)?;
     let blob = profile::read(name)?;
     let password = obtain_password(
         name,
-        false,
+        password_stdin,
         &format!("Enter password for profile '{name}': "),
     )?;
     let decrypted = crypto::decrypt(&blob, password.as_str())?;
@@ -261,13 +302,13 @@ pub fn show(name: &str, reveal: bool) -> Result<()> {
     Ok(())
 }
 
-/// `envrun export <name> [-o <file>]`
-pub fn export(name: &str, output: Option<PathBuf>) -> Result<()> {
+/// `envpouch export <name> [-o <file>]`
+pub fn export(name: &str, output: Option<PathBuf>, password_stdin: bool) -> Result<()> {
     profile::validate_name(name)?;
     let blob = profile::read(name)?;
     let password = obtain_password(
         name,
-        false,
+        password_stdin,
         &format!("Enter password for profile '{name}': "),
     )?;
     let decrypted = crypto::decrypt(&blob, password.as_str())?;
@@ -290,23 +331,23 @@ pub fn export(name: &str, output: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// `envrun edit <name>` (spec §5.3): decrypt into a 0600 temp file, open
+/// `envpouch edit <name>` (spec §5.3): decrypt into a 0600 temp file, open
 /// $EDITOR (default vi), parse back, re-encrypt atomically.
-pub fn edit(name: &str) -> Result<()> {
+pub fn edit(name: &str, password_stdin: bool) -> Result<()> {
     profile::validate_name(name)?;
     cleanup_edit_leftovers();
     let blob = profile::read(name)?;
     let password = obtain_password(
         name,
-        false,
+        password_stdin,
         &format!("Enter password for profile '{name}': "),
     )?;
     let decrypted = crypto::decrypt(&blob, password.as_str())?;
     let vars = EnvVars::from_json(&decrypted.plaintext)?;
 
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let editor = split_editor(std::env::var("EDITOR").ok().as_deref());
     let tmp = tempfile::Builder::new()
-        .prefix("envrun-edit-")
+        .prefix("envpouch-edit-")
         .suffix(".env")
         .rand_bytes(6)
         .tempfile_in(std::env::temp_dir())
@@ -324,10 +365,11 @@ pub fn edit(name: &str) -> Result<()> {
         path.display()
     );
 
-    let status = Command::new(&editor)
+    let status = Command::new(&editor[0])
+        .args(&editor[1..])
         .arg(&path)
         .status()
-        .with_context(|| format!("failed to launch editor: {editor}"))?;
+        .with_context(|| format!("failed to launch editor: {}", editor[0]))?;
     if !status.success() {
         bail!(
             "editor exited with {}; profile not modified",
@@ -354,30 +396,67 @@ pub fn edit(name: &str) -> Result<()> {
     ))
 }
 
-/// Best-effort cleanup of leftover `envrun-edit-*` temp files from killed
+/// $EDITOR may carry arguments (e.g. `code --wait`); split on whitespace.
+/// Whitespace-only or unset falls back to `vi` (spec §5.3).
+fn split_editor(editor: Option<&str>) -> Vec<String> {
+    match editor.map(str::trim).filter(|e| !e.is_empty()) {
+        Some(e) => e.split_whitespace().map(str::to_string).collect(),
+        None => vec!["vi".to_string()],
+    }
+}
+
+/// Best-effort cleanup of leftover `envpouch-edit-*` temp files from killed
 /// sessions (spec §5.3). Not a data incident, but do not accumulate them.
+/// $TMPDIR is shared between users on some platforms (/tmp on Linux), so only
+/// files owned by the current uid (unix) AND untouched for an hour are
+/// removed — a live concurrent edit session is never disturbed.
 fn cleanup_edit_leftovers() {
-    let dir = std::env::temp_dir();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for e in entries.flatten() {
-            let p = e.path();
-            if let Some(n) = p.file_name().and_then(|s| s.to_str())
-                && n.starts_with("envrun-edit-")
-            {
-                let _ = std::fs::remove_file(&p);
+    cleanup_edit_leftovers_in(&std::env::temp_dir(), std::time::Duration::from_secs(3600));
+}
+
+fn cleanup_edit_leftovers_in(dir: &Path, stale_after: std::time::Duration) {
+    #[cfg(unix)]
+    let euid = unsafe { libc::geteuid() };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("envpouch-edit-") {
+            continue;
+        }
+        let Ok(meta) = e.metadata() else {
+            continue;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // Not ours (another user's live session or leftover) — never touch
+            if meta.uid() != euid {
+                continue;
             }
+        }
+        let old_enough = meta
+            .modified()
+            .map(|t| t.elapsed().unwrap_or_default() > stale_after)
+            .unwrap_or(false);
+        if old_enough {
+            let _ = std::fs::remove_file(&p);
         }
     }
 }
 
-/// `envrun fpm-snippet <name>` (spec §4.7): emit php-fpm pool `env[...]`
+/// `envpouch fpm-snippet <name>` (spec §4.7): emit php-fpm pool `env[...]`
 /// lines on stdout.
-pub fn fpm_snippet(name: &str) -> Result<()> {
+pub fn fpm_snippet(name: &str, password_stdin: bool) -> Result<()> {
     profile::validate_name(name)?;
     let blob = profile::read(name)?;
     let password = obtain_password(
         name,
-        false,
+        password_stdin,
         &format!("Enter password for profile '{name}': "),
     )?;
     let decrypted = crypto::decrypt(&blob, password.as_str())?;
@@ -430,9 +509,9 @@ pub(crate) fn fpm_line(key: &str, value: &str) -> String {
     format!("env[{key}] = {v}")
 }
 
-/// `envrun diff <a> <b>` (spec §9 M4): show key-level differences with
+/// `envpouch diff <a> <b>` (spec §9 M4): show key-level differences with
 /// masked values.
-pub fn diff(name_a: &str, name_b: &str) -> Result<()> {
+pub fn diff(name_a: &str, name_b: &str, password_stdin: bool) -> Result<()> {
     profile::validate_name(name_a)?;
     profile::validate_name(name_b)?;
     if name_a == name_b {
@@ -441,7 +520,7 @@ pub fn diff(name_a: &str, name_b: &str) -> Result<()> {
     let blob_a = profile::read(name_a)?;
     let pw_a = obtain_password(
         name_a,
-        false,
+        password_stdin,
         &format!("Enter password for profile '{name_a}': "),
     )?;
     let vars_a = EnvVars::from_json(&crypto::decrypt(&blob_a, pw_a.as_str())?.plaintext)?;
@@ -449,7 +528,7 @@ pub fn diff(name_a: &str, name_b: &str) -> Result<()> {
     let blob_b = profile::read(name_b)?;
     let pw_b = obtain_password(
         name_b,
-        false,
+        password_stdin,
         &format!("Enter password for profile '{name_b}': "),
     )?;
     let vars_b = EnvVars::from_json(&crypto::decrypt(&blob_b, pw_b.as_str())?.plaintext)?;
@@ -507,13 +586,15 @@ pub fn diff(name_a: &str, name_b: &str) -> Result<()> {
     write_stdout(out.as_bytes())
 }
 
-/// `envrun run <name> [--clean] [--dry-run] [--detach] [--password-stdin] -- <cmd> [args...]`
+/// `envpouch run <name> [--clean] [--dry-run] [--detach] -- <cmd> [args...]`
+/// (`--password-stdin` is a global flag, usable with this and every other
+/// password-requiring command)
 ///
 /// Returns the child exit code (spec §3): child exit code 1:1, 127 not found,
-/// 126 no execute permission, 128+N killed by signal N, 1 for envrun errors.
+/// 126 no execute permission, 128+N killed by signal N, 1 for envpouch errors.
 ///
 /// Process model (spec §4.1, do not change): the child runs in its own
-/// process group (`process_group(0)`), envrun catches terminal signals and
+/// process group (`process_group(0)`), envpouch catches terminal signals and
 /// forwards them — the same model as `timeout`/`docker run`. No `sh -c`
 /// wrapping: the target program is exec'd directly.
 #[allow(clippy::too_many_arguments)]
@@ -537,6 +618,10 @@ pub fn run(
     )?;
     let decrypted = crypto::decrypt(&blob, password.as_str())?;
     let vars = EnvVars::from_json(&decrypted.plaintext)?;
+    // Stored data is trusted per spec §4.4 (validated at import/edit time),
+    // but a hand-crafted payload must still fail cleanly here instead of
+    // panicking inside `Command::env` (keys containing '=' or NUL).
+    validate_stored_keys(&vars)?;
 
     let env_map = build_env(clean, &vars);
 
@@ -556,7 +641,7 @@ pub fn run(
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // Own process group: terminal-generated signals reach envrun only and
+        // Own process group: terminal-generated signals reach envpouch only and
         // are forwarded explicitly (spec §4.1-§4.2).
         cmd.process_group(0);
         // Best-effort: disable core dumps for the child to shrink the leak
@@ -581,7 +666,7 @@ pub fn run(
             });
         }
         if detach {
-            // Spec §4.5 (P2): nohup-style detachment — new session, envrun
+            // Spec §4.5 (P2): nohup-style detachment — new session, envpouch
             // exits immediately after spawn. setsid is async-signal-safe.
             unsafe {
                 cmd.pre_exec(|| {
@@ -594,7 +679,7 @@ pub fn run(
 
     // Install forwarders after password entry so password stdin reads are
     // undisturbed and no signal gets lost before the child exists. Not needed
-    // for --detach (envrun exits immediately).
+    // for --detach (envpouch exits immediately).
     if !detach {
         #[cfg(unix)]
         signals::install();
@@ -610,13 +695,9 @@ pub fn run(
             eprintln!("error: permission denied: {}", command[0]);
             return Ok(126);
         }
+        // libc::E2BIG is 7 on unix and on the Windows CRT alike, so this one
+        // arm covers both platforms (no separate windows match needed)
         Err(e) if e.raw_os_error() == Some(libc::E2BIG) => {
-            eprintln!("error: environment too large (ARG_MAX limit)");
-            return Ok(1);
-        }
-        #[cfg(not(unix))]
-        Err(e) if e.raw_os_error() == Some(7) => {
-            // E2BIG on the Windows CRT is also errno 7
             eprintln!("error: environment too large (ARG_MAX limit)");
             return Ok(1);
         }
@@ -629,9 +710,9 @@ pub fn run(
         let pid = child.id();
         drop(child);
         // unix: the orphaned child is reaped by launchd/init and survives
-        // (setsid'd into its own session); windows: child outlives envrun too
+        // (setsid'd into its own session); windows: child outlives envpouch too
         return out_line(format!(
-            "Detached: pid {pid} (envrun exits; stdout/stderr still go to this terminal)"
+            "Detached: pid {pid} (envpouch exits; stdout/stderr still go to this terminal)"
         ))
         .map(|()| 0);
     }
@@ -642,7 +723,7 @@ pub fn run(
         // Polling loop (spec §4.2): 10 ms interval, negligible CPU cost.
         // SIGTERM does NOT reach the child automatically (the terminal only
         // signals the foreground group), so explicit forwarding is mandatory.
-        // On SIGTSTP envrun keeps running and polls (spec §4.2).
+        // On SIGTSTP envpouch keeps running and polls (spec §4.2).
         loop {
             if let Some(status) = child.try_wait()? {
                 return Ok(exit_code_of(&status));
@@ -792,14 +873,39 @@ fn exit_code_of(status: &std::process::ExitStatus) -> i32 {
     }
 }
 
-/// `--password-stdin`: read the first line of stdin, stripping `\n`/`\r\n`
-/// (spec §4.3). No ENVRUN_PASSPHRASE env var on purpose — process env is
-/// readable by same-user processes via /proc.
+/// `--password-stdin`: read the next line of stdin, stripping `\n`/`\r\n`
+/// (spec §4.3). Commands that prompt twice (passwd: current+new; diff: one
+/// per profile) read one line per prompt, in prompt order. Bounded so a
+/// runaway pipe cannot balloon memory. No ENVPOUCH_PASSPHRASE env var on
+/// purpose — process env is readable by same-user processes via /proc.
 fn read_password_stdin() -> Result<Zeroizing<String>> {
-    let mut line = String::new();
-    std::io::stdin()
-        .read_line(&mut line)
-        .context("failed to read password from stdin")?;
+    use std::io::Read as _;
+    const MAX_PASSWORD_BYTES: usize = 8 * 1024;
+    // Line-oriented AND bounded: multi-prompt commands (passwd, diff) read
+    // one line per call; a runaway pipe without newlines cannot balloon
+    // memory. The only legal over-length line is exactly MAX password bytes
+    // plus the terminating newline.
+    let mut buf = Zeroizing::new(Vec::new());
+    let mut lock = std::io::stdin().lock();
+    let mut byte = [0u8; 1];
+    loop {
+        match lock.read(&mut byte) {
+            Ok(0) => break, // EOF: last line may lack a newline
+            Ok(_) => {
+                buf.push(byte[0]);
+                if byte[0] == b'\n' || buf.len() > MAX_PASSWORD_BYTES {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e).context("failed to read password from stdin"),
+        }
+    }
+    if buf.len() > MAX_PASSWORD_BYTES && !(buf.len() == MAX_PASSWORD_BYTES + 1 && buf.last() == Some(&b'\n'))
+    {
+        bail!("password on stdin exceeds {MAX_PASSWORD_BYTES} bytes");
+    }
+    let line = std::str::from_utf8(&buf).context("password on stdin is not valid UTF-8")?;
     let pw = line.trim_end_matches(['\n', '\r']);
     if pw.is_empty() {
         bail!("no password provided on stdin");
@@ -807,12 +913,12 @@ fn read_password_stdin() -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(pw.to_string()))
 }
 
-/// `envrun list`
+/// `envpouch list`
 pub fn list() -> Result<()> {
     let profiles = profile::list()?;
     let mut out = String::new();
     if profiles.is_empty() {
-        out.push_str("No profiles yet. Create one with: envrun import <name> --from <env-file>\n");
+        out.push_str("No profiles yet. Create one with: envpouch import <name> --from <env-file>\n");
         return write_stdout(out.as_bytes());
     }
     let _ = writeln!(out, "{:<20} {:>8}  Updated", "Name", "Vars");
@@ -832,11 +938,11 @@ pub fn list() -> Result<()> {
     write_stdout(out.as_bytes())
 }
 
-/// `envrun rm <name>`
+/// `envpouch rm <name>`
 pub fn rm(name: &str) -> Result<()> {
     profile::validate_name(name)?;
     if !profile::exists(name)? {
-        bail!("profile '{name}' does not exist (see `envrun list`)");
+        bail!("profile '{name}' does not exist (see `envpouch list`)");
     }
     eprint!("Delete profile '{name}'? [y/N] ");
     std::io::stderr().flush()?;
@@ -850,21 +956,21 @@ pub fn rm(name: &str) -> Result<()> {
     out_line(format!("Profile '{name}' deleted"))
 }
 
-/// `envrun passwd <name>`: decrypt with the current password, re-encrypt with
+/// `envpouch passwd <name>`: decrypt with the current password, re-encrypt with
 /// a new one (v1 format unchanged; fresh salt/nonce per write). A cached
 /// keychain entry for the old password becomes stale — remove it.
-pub fn passwd(name: &str) -> Result<()> {
+pub fn passwd(name: &str, password_stdin: bool) -> Result<()> {
     profile::validate_name(name)?;
     let blob = profile::read(name)?;
     let old = obtain_password(
         name,
-        false,
+        password_stdin,
         &format!("Enter current password for profile '{name}': "),
     )?;
     let decrypted = crypto::decrypt(&blob, old.as_str())?;
     let vars = EnvVars::from_json(&decrypted.plaintext)?;
 
-    let new = prompt_new_password()?;
+    let new = new_password(password_stdin)?;
     let payload = vars.to_json()?;
     let meta = FileMeta {
         var_count: vars.len() as u32,
@@ -876,10 +982,10 @@ pub fn passwd(name: &str) -> Result<()> {
     out_line(format!("Password changed for profile '{name}'"))
 }
 
-/// `envrun unlock <name> [--ttl <seconds>]` (spec §4.3): verify the password,
+/// `envpouch unlock <name> [--ttl <seconds>]` (spec §4.3): verify the password,
 /// then cache it in the OS keychain. On keychain failure, degrade to a
 /// warning instead of hard-failing (SSH sessions without GUI access).
-pub fn unlock(name: &str, ttl: u64) -> Result<()> {
+pub fn unlock(name: &str, ttl: u64, password_stdin: bool) -> Result<()> {
     profile::validate_name(name)?;
     // Usage errors fail fast (§0.5) — they are not keychain unavailability
     // and must not be swallowed by the degrade path below.
@@ -890,7 +996,12 @@ pub fn unlock(name: &str, ttl: u64) -> Result<()> {
         );
     }
     let blob = profile::read(name)?;
-    let password = prompt_password(&format!("Enter password for profile '{name}': "))?;
+    // unlock verifies the real password: never the keychain cache itself
+    let password = if password_stdin {
+        read_password_stdin()?
+    } else {
+        prompt_password(&format!("Enter password for profile '{name}': "))?
+    };
     crypto::decrypt(&blob, password.as_str())?;
     match keycache::store(name, password.as_str(), ttl) {
         Ok(()) => out_line(format!(
@@ -905,7 +1016,7 @@ pub fn unlock(name: &str, ttl: u64) -> Result<()> {
     }
 }
 
-/// `envrun lock <name>`: remove the cached keychain entry.
+/// `envpouch lock <name>`: remove the cached keychain entry.
 pub fn lock(name: &str) -> Result<()> {
     profile::validate_name(name)?;
     let _ = keycache::clear(name);
@@ -947,6 +1058,61 @@ mod tests {
         assert_eq!(shell_quote(""), "''");
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn editor_splitting() {
+        assert_eq!(split_editor(None), vec!["vi"]);
+        assert_eq!(split_editor(Some("  ")), vec!["vi"]);
+        assert_eq!(split_editor(Some("vim")), vec!["vim"]);
+        // EDITOR may carry arguments (e.g. VS Code waits for the editor to close)
+        assert_eq!(split_editor(Some("code --wait")), vec!["code", "--wait"]);
+        assert_eq!(split_editor(Some("  emacs  -nw ")), vec!["emacs", "-nw"]);
+    }
+
+    /// Leftover edit files are only removed when stale: a file touched just
+    /// now (a live concurrent edit session) must survive the sweep.
+    #[test]
+    fn edit_leftover_sweep_only_removes_stale_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("envpouch-edit-x.env");
+        let other = dir.path().join("unrelated-edit-x.env");
+        std::fs::write(&target, b"A=1\n").unwrap();
+        std::fs::write(&other, b"A=1\n").unwrap();
+
+        // an hour threshold keeps a file touched just now (live session)
+        cleanup_edit_leftovers_in(dir.path(), std::time::Duration::from_secs(3600));
+        assert!(target.exists(), "file younger than the threshold survives");
+        assert!(other.exists(), "unrelated names are never touched");
+
+        // ~zero threshold: everything matching the prefix counts as stale
+        cleanup_edit_leftovers_in(dir.path(), std::time::Duration::from_nanos(1));
+        assert!(!target.exists(), "stale leftovers are removed");
+        assert!(other.exists(), "unrelated names are never touched");
+    }
+
+    /// A crafted/corrupted payload with invalid key names must fail cleanly
+    /// at `run` time (never panic inside `Command::env`).
+    #[test]
+    fn stored_keys_validated_defensively() {
+        let good = EnvVars::from_map(std::collections::BTreeMap::from([(
+            "FOO".to_string(),
+            "bar".to_string(),
+        )]));
+        assert!(validate_stored_keys(&good).is_ok());
+
+        let bad = EnvVars::from_map(std::collections::BTreeMap::from([
+            ("FOO".to_string(), "bar".to_string()),
+            ("BAD=KEY".to_string(), "x".to_string()),
+        ]));
+        let err = bad
+            .iter()
+            .filter(|(k, _)| envfile::validate_key(k, "").is_err())
+            .count();
+        assert_eq!(err, 1);
+        let msg = validate_stored_keys(&bad).unwrap_err().to_string();
+        assert!(msg.contains("BAD=KEY"), "error names the key only: {msg}");
+        assert!(!msg.contains("x\""), "error never contains values: {msg}");
     }
 
     /// A UTF-8 BOM prefix (typical of Windows-edited .env files) must never

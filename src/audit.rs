@@ -1,4 +1,4 @@
-//! Optional audit trail (off by default; enable with `ENVRUN_AUDIT=1`).
+//! Optional audit trail (off by default; enable with `ENVPOUCH_AUDIT=1`).
 //!
 //! Records one line per decrypting invocation: timestamp, subcommand,
 //! profile name, and outcome — **never variable keys or values** (spec:
@@ -11,9 +11,9 @@ use anyhow::Context;
 
 use crate::profile;
 
-/// Treat `ENVRUN_AUDIT` as enabled unless unset, empty, "0" or "false".
+/// Treat `ENVPOUCH_AUDIT` as enabled unless unset, empty, "0" or "false".
 fn enabled() -> bool {
-    match std::env::var_os("ENVRUN_AUDIT") {
+    match std::env::var_os("ENVPOUCH_AUDIT") {
         Some(v) => {
             let v = v.to_string_lossy().to_ascii_lowercase();
             !v.is_empty() && v != "0" && v != "false"
@@ -65,18 +65,18 @@ mod tests {
     use super::*;
 
     /// Edition 2024 makes env mutation unsafe; tests run in parallel threads,
-    /// but no other test touches ENVRUN_AUDIT/ENVRUN_HOME.
+    /// but no other test touches ENVPOUCH_AUDIT/ENVPOUCH_HOME.
     #[test]
     fn audit_respects_toggle_and_format() {
         let dir = tempfile::tempdir().unwrap();
         unsafe {
-            std::env::set_var("ENVRUN_HOME", dir.path());
-            std::env::set_var("ENVRUN_AUDIT", "1");
+            std::env::set_var("ENVPOUCH_HOME", dir.path());
+            std::env::set_var("ENVPOUCH_AUDIT", "1");
         }
         record("run", Some("prod"), "exit=0");
         record("list", None, "exit=0");
         unsafe {
-            std::env::set_var("ENVRUN_AUDIT", "0");
+            std::env::set_var("ENVPOUCH_AUDIT", "0");
         }
         record("show", Some("prod"), "error"); // must NOT be recorded
 
@@ -96,8 +96,8 @@ mod tests {
         }
 
         unsafe {
-            std::env::remove_var("ENVRUN_AUDIT");
-            std::env::remove_var("ENVRUN_HOME");
+            std::env::remove_var("ENVPOUCH_AUDIT");
+            std::env::remove_var("ENVPOUCH_HOME");
         }
     }
 }

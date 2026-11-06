@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# CLI-level fuzz smoke for envrun: feeds malformed inputs at the binary and
+# CLI-level fuzz smoke for envpouch: feeds malformed inputs at the binary and
 # asserts outcomes stay within the documented exit-code set (0/1/2/126/127)
 # with no panics, stack overflows, or allocation aborts. Complements the
 # in-process deterministic fuzz suite (src/fuzz_tests.rs), which covers the
 # pure functions; this script covers process-level behavior.
 #
-# Usage: scripts/fuzz_cli.sh [path-to-envrun-binary]
+# Usage: scripts/fuzz_cli.sh [path-to-envpouch-binary]
 set -u
-BIN="${1:-./target/release/envrun}"
+BIN="${1:-./target/release/envpouch}"
 PASS="fuzzcli-pass-123"
 WORK="$(mktemp -d)"
-PROFILES="$HOME/.envrun/profiles"
+PROFILES="$HOME/.envpouch/profiles"
 trap 'rm -rf "$WORK"' EXIT
 FAIL=0
 N=0
@@ -71,17 +71,17 @@ done
 
 echo "== 3) bit-flipped profile blobs → decrypt must degrade gracefully =="
 import_interactive victim /dev/null
-PROFILE="$PROFILES/victim.envrun"
+PROFILE="$PROFILES/victim.envpouch"
 if [ ! -f "$PROFILE" ]; then
   echo "setup failed: victim profile missing"
   exit 1
 fi
 SZ=$(wc -c <"$PROFILE" | tr -d ' ')
 for i in 0 1 2 3 4 5 6 7; do
-  cp "$PROFILE" "$PROFILES/corrupt$i.envrun"
+  cp "$PROFILE" "$PROFILES/corrupt$i.envpouch"
   OFF=$(( (SZ * i) / 8 + 1 ))
   printf "\\x$(printf '%02x' $(((i * 37 + 1) % 256)))" |
-    dd of="$PROFILES/corrupt$i.envrun" bs=1 seek="$OFF" conv=notrunc 2>/dev/null
+    dd of="$PROFILES/corrupt$i.envpouch" bs=1 seek="$OFF" conv=notrunc 2>/dev/null
   out="$("$BIN" run "corrupt$i" --password-stdin -- true 2>&1 <<<"$PASS")"
   check "$?" "$out"
   out="$("$BIN" list 2>&1)"
@@ -89,9 +89,9 @@ for i in 0 1 2 3 4 5 6 7; do
 done
 
 echo "== 4) garbage / directory files inside the profiles dir → list must survive =="
-head -c 200 /dev/urandom >"$PROFILES/junk1.envrun"
-head -c 200 /dev/urandom >"$PROFILES/junk2.envrun"
-mkdir -p "$PROFILES/junkdir.envrun"
+head -c 200 /dev/urandom >"$PROFILES/junk1.envpouch"
+head -c 200 /dev/urandom >"$PROFILES/junk2.envpouch"
+mkdir -p "$PROFILES/junkdir.envpouch"
 out="$("$BIN" list 2>&1)"
 check "$?" "$out"
 out="$("$BIN" run junk1 --password-stdin -- true 2>&1 <<<"$PASS")"
@@ -113,7 +113,7 @@ done
 for i in 0 1 2 3 4 5 6 7; do
   printf 'y\n' | "$BIN" rm "corrupt$i" >/dev/null 2>&1
 done
-rm -rf "$PROFILES/junkdir.envrun"
+rm -rf "$PROFILES/junkdir.envpouch"
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

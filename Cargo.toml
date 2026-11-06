@@ -1,8 +1,14 @@
 [package]
-name = "envrun"
+name = "envpouch"
 version = "0.1.0"
 edition = "2024"
 description = "Encrypted environment variable profile manager (import/export/run with password)"
+license = "MIT"
+repository = "https://github.com/wusende/envpouch"
+homepage = "https://github.com/wusende/envpouch"
+readme = "README.md"
+keywords = ["env", "dotenv", "secrets", "encryption", "cli"]
+categories = ["command-line-utilities", "config", "cryptography"]
 
 [dependencies]
 anyhow = "1"

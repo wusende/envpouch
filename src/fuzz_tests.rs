@@ -6,8 +6,9 @@
 //! overflow in debug, dotenvy internals) fails the suite.**
 //!
 //! Reproducible: a fixed-seed xorshift PRNG, so a failure can be replayed.
-
-#![cfg(test)]
+//!
+//! (The module is already gated by `#[cfg(test)]` in main.rs; no inner
+//! `#![cfg(test)]` — clippy flags the duplication.)
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 

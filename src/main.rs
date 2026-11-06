@@ -1,17 +1,18 @@
-//! envrun — encrypted environment variable profile manager.
+//! envpouch — encrypted environment variable profile manager.
 //!
 //! Usage:
-//! - `envrun import <name> (--from <file> | --from-env) [--merge]`   import into an encrypted profile
-//! - `envrun show <name> [--reveal]`                                 show variables (masked by default)
-//! - `envrun export <name> [-o <file>]`                              export as .env (stdout without -o)
-//! - `envrun edit <name>`                                            edit variables in $EDITOR
-//! - `envrun fpm-snippet <name>`                                     php-fpm pool env[...] lines
-//! - `envrun diff <a> <b>`                                           compare two profiles (masked)
-//! - `envrun run <name> -- <command> [args...]`                      run with the variables injected
-//! - `envrun list / rm / passwd / unlock / lock`                     profile management
+//! - `envpouch import <name> (--from <file> | --from-env) [--merge]`   import into an encrypted profile
+//! - `envpouch show <name> [--reveal]`                                 show variables (masked by default)
+//! - `envpouch export <name> [-o <file>]`                              export as .env (stdout without -o)
+//! - `envpouch edit <name>`                                            edit variables in $EDITOR
+//! - `envpouch fpm-snippet <name>`                                     php-fpm pool env[...] lines
+//! - `envpouch diff <a> <b>`                                           compare two profiles (masked)
+//! - `envpouch run <name> -- <command> [args...]`                      run with the variables injected
+//! - `envpouch list / rm / passwd / unlock / lock`                     profile management
 //!
-//! Every decrypting command obtains the password via --password-stdin, the
-//! OS keychain cache (`unlock`), or the interactive prompt (spec §4.3).
+//! Every decrypting command obtains the password via the global
+//! `--password-stdin` flag (one stdin line per prompt — scripts/CI), the OS
+//! keychain cache (`unlock`), or the interactive prompt (spec §4.3).
 
 mod audit;
 mod commands;
@@ -32,12 +33,16 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "envrun",
+    name = "envpouch",
     version,
     about = "Encrypted environment variable profile manager",
     long_about = "Store .env files as encrypted, password-protected profiles (Argon2id + AES-256-GCM),\nexport them, or inject them into child processes. Every import/show/export/run\nrequires the password."
 )]
 struct Cli {
+    /// Read passwords from stdin (one line per prompt, in prompt order)
+    /// instead of the interactive tty prompt — for scripts and CI
+    #[arg(long, global = true)]
+    password_stdin: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -109,12 +114,9 @@ enum Commands {
         /// Print what would be executed without running it (never any values)
         #[arg(long)]
         dry_run: bool,
-        /// Start the command detached in a new session; envrun exits immediately
+        /// Start the command detached in a new session; envpouch exits immediately
         #[arg(long)]
         detach: bool,
-        /// Read the password from the first line of stdin (for scripts/CI)
-        #[arg(long)]
-        password_stdin: bool,
         /// Command and arguments to execute (separate them with --)
         #[arg(
             trailing_var_arg = true,
@@ -179,17 +181,18 @@ impl Commands {
 
 fn main() {
     let cli = Cli::parse();
+    let password_stdin = cli.password_stdin;
     let (action, profile) = cli.command.audit_info();
-    let code = dispatch(cli.command);
+    let code = dispatch(password_stdin, cli.command);
     audit::record(action, profile.as_deref(), &format!("exit={code}"));
     if code != 0 {
         std::process::exit(code);
     }
 }
 
-/// Exit codes (spec §3): 0 success, 1 envrun error, 2 usage error (clap default).
+/// Exit codes (spec §3): 0 success, 1 envpouch error, 2 usage error (clap default).
 /// `run` forwards the child's exit code 1:1.
-fn dispatch(command: Commands) -> i32 {
+fn dispatch(password_stdin: bool, command: Commands) -> i32 {
     let result = match command {
         Commands::Import {
             name,
@@ -198,28 +201,34 @@ fn dispatch(command: Commands) -> i32 {
             only,
             except,
             merge,
-        } => commands::import_command(&name, from, from_env, only, except, merge).map(|_| 0),
-        Commands::Show { name, reveal } => commands::show(&name, reveal).map(|_| 0),
-        Commands::Export { name, output } => commands::export(&name, output).map(|_| 0),
-        Commands::Edit { name } => commands::edit(&name).map(|_| 0),
-        Commands::FpmSnippet { name } => commands::fpm_snippet(&name).map(|_| 0),
-        Commands::Diff { name_a, name_b } => commands::diff(&name_a, &name_b).map(|_| 0),
+        } => {
+            commands::import_command(&name, from, from_env, only, except, merge, password_stdin)
+                .map(|_| 0)
+        }
+        Commands::Show { name, reveal } => commands::show(&name, reveal, password_stdin).map(|_| 0),
+        Commands::Export { name, output } => {
+            commands::export(&name, output, password_stdin).map(|_| 0)
+        }
+        Commands::Edit { name } => commands::edit(&name, password_stdin).map(|_| 0),
+        Commands::FpmSnippet { name } => commands::fpm_snippet(&name, password_stdin).map(|_| 0),
+        Commands::Diff { name_a, name_b } => {
+            commands::diff(&name_a, &name_b, password_stdin).map(|_| 0)
+        }
         Commands::Run {
             name,
             clean,
             dry_run,
             detach,
-            password_stdin,
             command,
         } => commands::run(&name, clean, dry_run, detach, password_stdin, &command),
         Commands::List => commands::list().map(|_| 0),
         Commands::Rm { name } => commands::rm(&name).map(|_| 0),
-        Commands::Passwd { name } => commands::passwd(&name).map(|_| 0),
-        Commands::Unlock { name, ttl } => commands::unlock(&name, ttl).map(|_| 0),
+        Commands::Passwd { name } => commands::passwd(&name, password_stdin).map(|_| 0),
+        Commands::Unlock { name, ttl } => commands::unlock(&name, ttl, password_stdin).map(|_| 0),
         Commands::Lock { name } => commands::lock(&name).map(|_| 0),
         Commands::Complete { shell } => {
             let mut buf = Vec::new();
-            clap_complete::generate(shell, &mut Cli::command(), "envrun", &mut buf);
+            clap_complete::generate(shell, &mut Cli::command(), "envpouch", &mut buf);
             commands::write_stdout(&buf).map(|_| 0)
         }
     };

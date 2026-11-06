@@ -3,7 +3,7 @@
 //!
 //! File format (v1):
 //! ```text
-//! magic "ENVRUN"(6B) | version(1B) | salt(16B) | argon2 params m/t/p(12B, LE)
+//! magic "ENVPOUCH"(8B) | version(1B) | salt(16B) | argon2 params m/t/p(12B, LE)
 //! | nonce(12B) | var_count(4B, LE) | updated_at(8B, LE) | AES-256-GCM ciphertext
 //! ```
 //! The header (everything before the ciphertext) is used as GCM AAD, so tampering
@@ -17,15 +17,18 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use getrandom::getrandom;
 use zeroize::Zeroizing;
 
-pub const MAGIC: &[u8; 6] = b"ENVRUN";
+/// On-disk format v1 magic. Frozen now that the format is defined: changing it
+/// (or its length) breaks decryption of every existing profile, so from here
+/// on it only changes together with a format version bump.
+pub const MAGIC: &[u8; 8] = b"ENVPOUCH";
 pub const FORMAT_VERSION: u8 = 1;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 /// GCM authentication tag length (fixed 128 bits)
 const TAG_LEN: usize = 16;
-/// Header size: magic(6) + version(1) + salt(16) + kdf params(12) + nonce(12) + var_count(4) + updated_at(8)
-pub const HEADER_LEN: usize = 6 + 1 + SALT_LEN + 12 + NONCE_LEN + 4 + 8;
+/// Header size: magic + version(1) + salt(16) + kdf params(12) + nonce(12) + var_count(4) + updated_at(8)
+pub const HEADER_LEN: usize = MAGIC.len() + 1 + SALT_LEN + 12 + NONCE_LEN + 4 + 8;
 
 /// OWASP-recommended Argon2id parameters: m=19 MiB, t=2, p=1
 pub const DEFAULT_M_COST: u32 = 19 * 1024;
@@ -142,10 +145,10 @@ pub fn encrypt(plaintext: &[u8], password: &str, meta: FileMeta) -> Result<Vec<u
 /// Decrypt profile file bytes. Returns an error on wrong password or tampered content.
 pub fn decrypt(blob: &[u8], password: &str) -> Result<Decrypted> {
     if blob.len() < HEADER_LEN + TAG_LEN {
-        bail!("file too small to be a valid envrun profile");
+        bail!("file too small to be a valid envpouch profile");
     }
     if &blob[..MAGIC.len()] != MAGIC {
-        bail!("not a valid envrun profile (magic mismatch)");
+        bail!("not a valid envpouch profile (magic mismatch)");
     }
     if blob[MAGIC.len()] != FORMAT_VERSION {
         bail!(
@@ -206,7 +209,7 @@ pub fn decrypt(blob: &[u8], password: &str) -> Result<Decrypted> {
 /// Parse only the plaintext header metadata (used by `list`, no password needed).
 pub fn read_meta(blob: &[u8]) -> Result<FileMeta> {
     if blob.len() < HEADER_LEN || &blob[..MAGIC.len()] != MAGIC {
-        bail!("not a valid envrun profile");
+        bail!("not a valid envpouch profile");
     }
     if blob[MAGIC.len()] != FORMAT_VERSION {
         bail!("unsupported profile file version: {}", blob[MAGIC.len()]);
@@ -273,7 +276,7 @@ mod tests {
     #[test]
     fn unsupported_version_rejected() {
         let mut blob = encrypt(b"x", "pw123456", sample_meta()).unwrap();
-        blob[6] = 99;
+        blob[MAGIC.len()] = 99;
         assert!(decrypt(&blob, "pw123456").is_err());
     }
 

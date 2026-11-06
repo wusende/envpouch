@@ -1,7 +1,7 @@
 //! Profile storage management: directory, paths, name validation, atomic
 //! writes, listing, and deletion.
 //!
-//! Profiles live at `~/.envrun/profiles/<name>.envrun`. Writes use
+//! Profiles live at `~/.envpouch/profiles/<name>.envpouch`. Writes use
 //! temp-file + rename atomic replacement; on unix, directory mode is 0700
 //! and file mode is 0600.
 
@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::crypto;
 
-const PROFILE_EXT: &str = "envrun";
+const PROFILE_EXT: &str = "envpouch";
 
 /// Profile name validation: prevents path traversal and keeps filenames safe.
 pub fn validate_name(name: &str) -> Result<()> {
@@ -32,16 +32,16 @@ pub fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Base storage directory: `$ENVRUN_HOME` when set (ops: containers, service
-/// accounts, multi-instance isolation), otherwise `~/.envrun`.
+/// Base storage directory: `$ENVPOUCH_HOME` when set (ops: containers, service
+/// accounts, multi-instance isolation), otherwise `~/.envpouch`.
 pub fn base_dir() -> Result<PathBuf> {
-    match std::env::var_os("ENVRUN_HOME") {
+    match std::env::var_os("ENVPOUCH_HOME") {
         Some(h) if !h.is_empty() => Ok(PathBuf::from(h)),
         _ => {
             let home = dirs::home_dir().context(
-                "cannot determine home directory (set ENVRUN_HOME to an absolute path to override)",
+                "cannot determine home directory (set ENVPOUCH_HOME to an absolute path to override)",
             )?;
-            Ok(home.join(".envrun"))
+            Ok(home.join(".envpouch"))
         }
     }
 }
@@ -74,7 +74,7 @@ fn set_permissions(path: &Path, mode: u32) -> Result<()> {
 /// Atomically write a profile (temp file + rename). Mode 0600 on unix.
 pub fn write(name: &str, blob: &[u8]) -> Result<()> {
     let path = profile_path(name)?;
-    // Unique per-process temp name: two concurrent envrun processes writing
+    // Unique per-process temp name: two concurrent envpouch processes writing
     // the same profile must not clobber each other's temp file (review fix)
     let tmp = path.with_extension(format!("{PROFILE_EXT}.{}.tmp", std::process::id()));
     {
@@ -94,7 +94,7 @@ pub fn write(name: &str, blob: &[u8]) -> Result<()> {
 pub fn read(name: &str) -> Result<Vec<u8>> {
     let path = profile_path(name)?;
     if !path.exists() {
-        bail!("profile '{name}' does not exist (see `envrun list`)");
+        bail!("profile '{name}' does not exist (see `envpouch list`)");
     }
     fs::read(&path).with_context(|| format!("failed to read profile: {}", path.display()))
 }
@@ -102,7 +102,7 @@ pub fn read(name: &str) -> Result<Vec<u8>> {
 pub fn delete(name: &str) -> Result<()> {
     let path = profile_path(name)?;
     if !path.exists() {
-        bail!("profile '{name}' does not exist (see `envrun list`)");
+        bail!("profile '{name}' does not exist (see `envpouch list`)");
     }
     fs::remove_file(&path)
         .with_context(|| format!("failed to delete profile file: {}", path.display()))
@@ -157,7 +157,7 @@ pub fn list() -> Result<Vec<ProfileMeta>> {
     Ok(out)
 }
 
-/// Best-effort sweep of leftover `<name>.envrun.<pid>.tmp` files from runs
+/// Best-effort sweep of leftover `<name>.envpouch.<pid>.tmp` files from runs
 /// killed between temp-file creation and rename. Only removes files older
 /// than an hour so a concurrent write in progress is never disturbed
 /// (production hardening: crash leftovers must not accumulate forever).

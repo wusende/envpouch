@@ -80,7 +80,7 @@ impl EnvVars {
     /// Produce .env text. Values are quoted as needed so that re-importing
     /// yields identical key/value semantics.
     pub fn to_env_text(&self) -> String {
-        let mut out = String::from("# exported by envrun\n");
+        let mut out = String::from("# exported by envpouch\n");
         for (k, v) in &self.0 {
             out.push_str(k);
             out.push('=');

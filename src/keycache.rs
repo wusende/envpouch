@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use keyring::Entry;
 use zeroize::Zeroizing;
 
-const SERVICE: &str = "envrun";
+const SERVICE: &str = "envpouch";
 
 /// Upper bound for cache TTL: prevents `now + ttl` arithmetic overflow and
 /// keeps a cached plaintext password from living arbitrarily long in the
@@ -47,6 +47,12 @@ fn with_timeout<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Op
 
 /// Store `password` for `name`, expiring `ttl_secs` from now.
 /// Stored format: "<expiry_unix_secs>\n<password>".
+///
+/// If the keychain call times out, we tell the user it failed — so the helper
+/// thread aborts before starting the write if the caller already gave up
+/// (closes the common slow-keychain case; a write already mid-flight when the
+/// timeout fires cannot be recalled, which is harmless: the password is the
+/// verified one).
 pub fn store(name: &str, password: &str, ttl_secs: u64) -> Result<()> {
     if ttl_secs == 0 || ttl_secs > MAX_TTL_SECS {
         anyhow::bail!(
@@ -61,12 +67,23 @@ pub fn store(name: &str, password: &str, ttl_secs: u64) -> Result<()> {
         + ttl_secs;
     let name = name.to_string();
     let payload = Zeroizing::new(format!("{expiry}\n{password}"));
-    match with_timeout(move || entry(&name).and_then(|e| e.set_password(&payload))) {
-        Some(Ok(())) => Ok(()),
-        Some(Err(e)) => Err(anyhow::Error::from(e)),
-        None => anyhow::bail!(
-            "keychain access timed out (GUI authorization prompt?); type the password manually instead"
-        ),
+    let abandoned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = abandoned.clone();
+    match with_timeout(move || {
+        if flag.load(std::sync::atomic::Ordering::Relaxed) {
+            return None; // caller already reported failure — do not write late
+        }
+        Some(entry(&name).and_then(|e| e.set_password(&payload)))
+    }) {
+        Some(Some(Ok(()))) => Ok(()),
+        Some(Some(Err(e))) => Err(anyhow::Error::from(e)),
+        Some(None) => Ok(()), // abandoned before write; reported via timeout below
+        None => {
+            abandoned.store(true, std::sync::atomic::Ordering::Relaxed);
+            anyhow::bail!(
+                "keychain access timed out (GUI authorization prompt?); type the password manually instead"
+            )
+        }
     }
 }
 
