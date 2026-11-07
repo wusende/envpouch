@@ -435,6 +435,9 @@ fn resolve_prompted(parsed: Vec<Assignment>) -> Result<Vec<(String, String)>> {
 pub fn set(name: &str, assignments: &[String], input: &mut PasswordInput) -> Result<()> {
     profile::validate_name(name)?;
     let parsed = parse_assignments(assignments, input.reserves_stdin())?;
+    // Cover the whole read-modify-write window: without the lock, a racing
+    // update would be silently overwritten (last rename wins).
+    let _guard = profile::lock_profile(name)?;
 
     let existed = profile::exists(name)?;
     let (mut vars, derived) = if existed {
@@ -470,6 +473,7 @@ pub fn set(name: &str, assignments: &[String], input: &mut PasswordInput) -> Res
 /// do not fail the command unless nothing at all matched.
 pub fn unset(name: &str, keys: &[String], input: &mut PasswordInput) -> Result<()> {
     profile::validate_name(name)?;
+    let _guard = profile::lock_profile(name)?;
     if !profile::exists(name)? {
         bail!("profile '{name}' does not exist (create it with `envp set` or `envp import`)");
     }
@@ -516,6 +520,10 @@ fn import_vars(
     skipped_note: &str,
     input: &mut PasswordInput,
 ) -> Result<()> {
+    // The lock must precede the exists check: two concurrent first-imports
+    // would otherwise both see "not exists" and the second would silently
+    // replace the first (with its own password).
+    let _guard = profile::lock_profile(name)?;
     let existed = profile::exists(name)?;
     if existed && !merge {
         bail!("profile '{name}' already exists (use --merge to merge into it)");
@@ -600,6 +608,10 @@ pub fn export(name: &str, output: Option<PathBuf>, input: &mut PasswordInput) ->
 /// $EDITOR (default vi), parse back, re-encrypt atomically.
 pub fn edit(name: &str, input: &mut PasswordInput) -> Result<()> {
     cleanup_edit_leftovers();
+    // Held for the whole editor session: a concurrent update must not be
+    // clobbered by this edit's stale snapshot, so it fails with "busy"
+    // instead. (The editor may hold the lock for minutes by design.)
+    let _guard = profile::lock_profile(name)?;
     let (vars, key) = open_profile(name, input)?;
 
     let editor = split_editor(std::env::var("EDITOR").ok().as_deref());
@@ -607,7 +619,7 @@ pub fn edit(name: &str, input: &mut PasswordInput) -> Result<()> {
         .prefix("envpouch-edit-")
         .suffix(".env")
         .rand_bytes(6)
-        .tempfile_in(std::env::temp_dir())
+        .tempfile_in(profile::edit_dir()?)
         .context("failed to create temp file for editing")?;
     // tempfile crate creates the file with mode 0600 on unix
     {
@@ -658,11 +670,16 @@ fn split_editor(editor: Option<&str>) -> Vec<String> {
 
 /// Best-effort cleanup of leftover `envpouch-edit-*` temp files from killed
 /// sessions (spec §5.3). Not a data incident, but do not accumulate them.
-/// $TMPDIR is shared between users on some platforms (/tmp on Linux), so only
-/// files owned by the current uid (unix) AND untouched for an hour are
-/// removed — a live concurrent edit session is never disturbed.
+/// Sweeps both the current edit dir (under ENVPOUCH_HOME) and the shared
+/// system temp dir (leftovers from older versions). Files owned by another
+/// user (unix) or touched within the last hour — a live concurrent edit
+/// session — are never removed.
 fn cleanup_edit_leftovers() {
-    cleanup_edit_leftovers_in(&std::env::temp_dir(), std::time::Duration::from_secs(3600));
+    let stale = std::time::Duration::from_secs(3600);
+    cleanup_edit_leftovers_in(&std::env::temp_dir(), stale);
+    if let Ok(dir) = profile::edit_dir() {
+        cleanup_edit_leftovers_in(&dir, stale);
+    }
 }
 
 fn cleanup_edit_leftovers_in(dir: &Path, stale_after: std::time::Duration) {
@@ -1145,6 +1162,7 @@ pub fn list() -> Result<()> {
 /// scripts) reads EOF and the answer is always "no" (review fix).
 pub fn rm(name: &str, yes: bool) -> Result<()> {
     profile::validate_name(name)?;
+    let _guard = profile::lock_profile(name)?;
     if !profile::exists(name)? {
         bail!("profile '{name}' does not exist (see `envp list`)");
     }
@@ -1162,19 +1180,12 @@ pub fn rm(name: &str, yes: bool) -> Result<()> {
     out_line(format!("Profile '{name}' deleted"))
 }
 
-/// Shared guards for `cp`/`rename`: valid names, distinct, source present,
-/// destination free.
-fn check_transfer_args(src: &str, dst: &str) -> Result<()> {
+/// Shared guards for `cp`/`rename`: valid, distinct names.
+fn check_transfer_names(src: &str, dst: &str) -> Result<()> {
     profile::validate_name(src)?;
     profile::validate_name(dst)?;
     if src == dst {
         bail!("source and destination are the same profile");
-    }
-    if !profile::exists(src)? {
-        bail!("profile '{src}' does not exist (see `envp list`)");
-    }
-    if profile::exists(dst)? {
-        bail!("profile '{dst}' already exists (see `envp list`)");
     }
     Ok(())
 }
@@ -1183,7 +1194,17 @@ fn check_transfer_args(src: &str, dst: &str) -> Result<()> {
 /// self-contained files, so this is a controlled copy through the same
 /// atomic-write path as every other save — no decryption, password unchanged.
 pub fn cp(src: &str, dst: &str) -> Result<()> {
-    check_transfer_args(src, dst)?;
+    check_transfer_names(src, dst)?;
+    // The mutated side is dst — lock it so a concurrent update to dst cannot
+    // be silently overwritten. src needs no lock: rename replaces whole
+    // files, so a concurrent update to src still yields one complete version.
+    let _guard = profile::lock_profile(dst)?;
+    if !profile::exists(src)? {
+        bail!("profile '{src}' does not exist (see `envp list`)");
+    }
+    if profile::exists(dst)? {
+        bail!("profile '{dst}' already exists (see `envp list`)");
+    }
     let blob = profile::read(src)?;
     profile::write(dst, &blob)?;
     out_line(format!("Profile '{src}' copied to '{dst}'"))
@@ -1191,7 +1212,19 @@ pub fn cp(src: &str, dst: &str) -> Result<()> {
 
 /// `envp rename <src> <dst>` (alias `mv`): rename in place.
 pub fn rename(src: &str, dst: &str) -> Result<()> {
-    check_transfer_args(src, dst)?;
+    check_transfer_names(src, dst)?;
+    // Both names change — lock both, in sorted order, so `rename a b` racing
+    // `rename b c` cannot deadlock.
+    let mut order = [src, dst];
+    order.sort_unstable();
+    let _guard_first = profile::lock_profile(order[0])?;
+    let _guard_second = profile::lock_profile(order[1])?;
+    if !profile::exists(src)? {
+        bail!("profile '{src}' does not exist (see `envp list`)");
+    }
+    if profile::exists(dst)? {
+        bail!("profile '{dst}' already exists (see `envp list`)");
+    }
     profile::rename(src, dst)?;
     out_line(format!("Profile '{src}' renamed to '{dst}'"))
 }
@@ -1199,6 +1232,7 @@ pub fn rename(src: &str, dst: &str) -> Result<()> {
 /// `envp passwd <name>`: decrypt with the current password, re-encrypt with
 /// a new one (v1 format unchanged; fresh salt/nonce per write).
 pub fn passwd(name: &str, input: &mut PasswordInput) -> Result<()> {
+    let _guard = profile::lock_profile(name)?;
     let (vars, _) = open_profile(name, input)?;
 
     let new = new_password(input)?;
@@ -1479,5 +1513,34 @@ mod tests {
         let mut input = PasswordInput::from_flags(false, Some(p)).unwrap();
         let err = input.next_password().unwrap_err().to_string();
         assert!(err.contains("is empty"), "{err}");
+    }
+
+    /// End-to-end proof that `set` takes the profile lock: another envp
+    /// process holding it turns the second update into a clean "busy" error
+    /// instead of a silent lost update. (unix only — on Windows the lock is
+    /// a no-op.)
+    #[cfg(unix)]
+    #[test]
+    fn set_fails_cleanly_while_profile_is_locked() {
+        let _env = crate::testutil::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::testutil::set_envpouch_home(dir.path());
+
+        let pw = dir.path().join("pw");
+        std::fs::write(&pw, "lock-test-password\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&pw, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mut input = PasswordInput::from_flags(false, Some(pw)).unwrap();
+        set("lockt", &["A=1".into()], &mut input).expect("first set creates the profile");
+
+        let guard = profile::try_lock("lockt", std::time::Duration::from_millis(50)).unwrap();
+        let err = set("lockt", &["B=2".into()], &mut input).unwrap_err();
+        assert!(err.to_string().contains("busy"), "{err}");
+        drop(guard);
+
+        crate::testutil::clear_envpouch_home();
     }
 }

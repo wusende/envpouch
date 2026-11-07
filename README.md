@@ -40,6 +40,13 @@ envp run prod ./start-server.sh           # decrypt and run with them set
 Each profile is one encrypted file under `~/.envpouch/profiles/` — copy
 that directory to back everything up (see [Files](#files)).
 
+Mutating commands (`import`, `set`, `unset`, `edit`, `passwd`, `rm`, `cp`,
+`rename`) hold an exclusive lock on `<name>.envpouch.lock` while they work
+(unix), so concurrent updates queue up instead of silently overwriting each
+other; after ~5 seconds of waiting the command fails with a "busy" error.
+The 0-byte lock files are normal, ignored by `envp list`, and copying or
+deleting them is harmless.
+
 Every command that decrypts gets the password one of three ways: the
 interactive prompt (default), `--password-stdin` reading it from stdin
 for scripts, or `--password-file <file>` reading one password per line
@@ -240,8 +247,11 @@ application sees.
 
 - Export and edit rewrite the profile in canonical form (alphabetical
   keys); comments and formatting from the source `.env` are not kept.
-- `edit` briefly keeps a plaintext temp file (mode 0600) while the editor
-  is open.
+- `edit` keeps a plaintext temp file (mode 0600, in a 0700 directory under
+  `ENVPOUCH_HOME`) while the editor is open. If the editor is killed, the
+  file lingers there until the next `edit` removes files older than an
+  hour. (Older versions used the shared system temp directory; leftovers
+  from those versions are still swept from there.)
 - On Windows there is no `exec`: `run` spawns and waits, so one extra
   process remains (Ctrl-C reaches the application via the shared console).
   File permissions are NTFS ACLs rather than 0600. There, `run

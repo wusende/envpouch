@@ -25,6 +25,8 @@ mod exclude;
 mod fuzz_tests;
 mod mask;
 mod profile;
+#[cfg(test)]
+mod testutil;
 
 use std::path::PathBuf;
 

@@ -11,10 +11,31 @@
 //! `exit=N` means the target never started.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
 use crate::profile;
+
+/// Rotate audit.log to audit.log.1 (one generation kept) when it grows past
+/// this size, so an enabled audit trail cannot grow a long-lived service's
+/// disk without bound. Best-effort, like everything in this module.
+const MAX_AUDIT_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Rename `log` to `<log>.1` when it is at least `max_bytes`. Concurrent envp
+/// processes may race here; a lost race (the file is already gone) is ignored
+/// — the append in the caller proceeds either way.
+fn rotate_if_large(log: &Path, max_bytes: u64) -> bool {
+    let large = std::fs::metadata(log)
+        .map(|m| m.len() >= max_bytes)
+        .unwrap_or(false);
+    if !large {
+        return false;
+    }
+    let mut rotated = log.as_os_str().to_os_string();
+    rotated.push(".1");
+    std::fs::rename(log, PathBuf::from(rotated)).is_ok()
+}
 
 /// Treat `ENVPOUCH_AUDIT` as enabled unless unset, empty, "0" or "false".
 fn enabled() -> bool {
@@ -34,6 +55,7 @@ pub fn record(action: &str, profile: Option<&str>, outcome: &str) {
     }
     let result = (|| -> anyhow::Result<()> {
         let log = profile::base_dir()?.join("audit.log");
+        rotate_if_large(&log, MAX_AUDIT_BYTES);
         let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%z");
         let line = format!("{ts}\t{action}\t{}\t{outcome}\n", profile.unwrap_or("-"));
         #[cfg(unix)]
@@ -69,10 +91,11 @@ pub fn record(action: &str, profile: Option<&str>, outcome: &str) {
 mod tests {
     use super::*;
 
-    /// Edition 2024 makes env mutation unsafe; tests run in parallel threads,
-    /// but no other test touches ENVPOUCH_AUDIT/ENVPOUCH_HOME.
+    /// Edition 2024 makes env mutation unsafe; tests touching ENVPOUCH_HOME/
+    /// ENVPOUCH_AUDIT serialize on testutil's mutex (parallel tests exist).
     #[test]
     fn audit_respects_toggle_and_format() {
+        let _env = crate::testutil::lock_env();
         let dir = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("ENVPOUCH_HOME", dir.path());
@@ -104,5 +127,25 @@ mod tests {
             std::env::remove_var("ENVPOUCH_AUDIT");
             std::env::remove_var("ENVPOUCH_HOME");
         }
+    }
+
+    #[test]
+    fn audit_log_rotates_at_size_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("audit.log");
+        std::fs::write(&log, b"0123456789").unwrap();
+
+        assert!(!rotate_if_large(&log, 100), "below threshold: untouched");
+        assert!(log.exists());
+
+        assert!(rotate_if_large(&log, 5), "at/over threshold: rotated");
+        assert!(!log.exists());
+        assert_eq!(
+            std::fs::read(dir.path().join("audit.log.1")).unwrap(),
+            b"0123456789"
+        );
+
+        assert!(!rotate_if_large(&log, 5), "nothing left to rotate");
+        // the next record() appends to a freshly created audit.log
     }
 }
