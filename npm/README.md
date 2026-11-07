@@ -4,7 +4,7 @@
 
 | registry | 包 | 发布方式 |
 |---|---|---|
-| crates.io | `envpouch` | 本机 `cargo publish`（手动） |
+| crates.io | `envpouch` | 打 tag 后 CI 自动发布（OIDC 无 token） |
 | npm | `envpouch` | 打 tag 后 CI 自动发布（OIDC 无 token） |
 
 ## npm 包的形态
@@ -77,10 +77,26 @@ GitHub Releases 没有 npm 那样的国内镜像，安装路径上放了最不�
 token 在 `~/.cargo/credentials.toml`（**不要**提交、不要贴进聊天）。crates.io
 只认已发布过的版本，发布后不可删除（只能在 24 小时内 yank，且名字永久保留）。
 
+### CI 自动发布（trusted publishing）
+
+和 npm 一样：推 tag 时 `release.yml` 的 `crates-io` job 用 OIDC 换一个 30 分钟
+有效期的 token（`rust-lang/crates-io-auth-action`），不落长期密钥。一次性准备：
+
+1. crates.io → 打开 `envpouch` → **Settings → Trusted Publishing** → Add：
+   Provider `GitHub`，Repository owner `wusende`，Repository name `envpouch`，
+   Workflow filename `release.yml`。
+2. 仓库 Settings → Variables 加 `CRATES_PUBLISH = true`。
+
+未设变量时该 job 直接跳过（不红），和 `NPM_PUBLISH` 同一个开关逻辑。配置好之后
+建议把账号的 API token 权限改成「只限发布」，或干脆吊销——CI 不再用它。
+
+### 本地手动发布（备用）
+
+本机 token 只留作应急，脚本可重复执行（版本已在线上就跳过）：
+
 ```bash
-cargo package --list          # 看会打进 crate 的文件
-cargo publish --dry-run       # 完整验证但不落地
-cargo publish                 # 真正发布（0.1.0 是首次）
+bash scripts/cargo-publish.sh --dry-run   # 完整验证但不落地
+bash scripts/cargo-publish.sh             # 真正发布
 ```
 
 `Cargo.toml` 里的 `exclude = [".github", "scripts", "npm"]` 保证 crate 里只有
@@ -95,11 +111,17 @@ cargo publish                 # 真正发布（0.1.0 是首次）
 
 ```bash
 # 1. 改 Cargo.toml 版本 + npm/envpouch/package.json 的 version，提交
-# 2. 先发 crate（可重复；已存在的版本会报 already uploaded）
-cargo publish
-# 3. 打 tag → CI 构建四平台、打包成单包发布 npm（NPM_PUBLISH=true 时）
+# 2. 打 tag → CI 构建六平台二进制、发 Release、发 crates.io、发 npm
 git tag v0.1.1 && git push origin v0.1.1
 ```
+
+两个 registry 都只要打 tag。任何一个 registry 没配置好（`CRATES_PUBLISH` /
+`NPM_PUBLISH` 未设 true）时对应 job 跳过；配置好之后本地什么都不用做。
+发失败可重试：两个发布脚本都会跳过已存在的版本，不会因为「版本已上传」变红。
+
+tag 必须等于 `v` + `Cargo.toml` 里的版本号（`v0.2.2` ↔ `0.2.2`）：crate 版本
+一旦发出去就再也收不回，所以 `cargo-publish.sh` 在 tag 构建上先比对，不一致
+直接失败，避免用一个错误的 tag 花掉一个版本号。
 
 CI 里的 npm job 用本次构建产物（`--from-artifacts`），不依赖 Release 上传完成的
 时序。手动补发：`bash scripts/npm-pack.sh --from-release && bash scripts/npm-publish.sh`。
@@ -132,3 +154,4 @@ envp --version
 - `npm/envpouch/` — 启动壳与清单（唯一提交的 package.json）
 - `scripts/npm-pack.sh` — 拉资产、校验 sha256、解包进 `npm/dist/envpouch/vendor/**`
 - `scripts/npm-publish.sh` — 发布单包；已发布的版本自动跳过，2FA 码过期可直接重跑
+- `scripts/cargo-publish.sh` — 发布 crate；已发布的版本自动跳过，CI 走 OIDC token
