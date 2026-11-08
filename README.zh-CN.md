@@ -24,7 +24,7 @@ envp run prod ./start-server.sh
 |---|---|---|
 | 提交进 git | `.env.production` 进了仓库,之后每个 fork、每个 clone 都握着活的密钥 | profile 是 AES-256-GCM 加密文件,仓库里永远看不到值 |
 | 备份与同步 | Time Machine、Nextcloud、`rsync` 把家目录整个快照走,密钥一起 | 没有密码的 profile 文件是死的(Argon2id,无找回) |
-| 长期运行的进程 | 服务带着密钥跑几周,同用户任何进程都能读(`/proc/<pid>/environ`) | 不留包装进程的第二份副本,默认关 core dump;同 uid 的读者仍能看到活着的环境变量([原因](https://github.com/wusende/envpouch/blob/main/docs/security.md#ai-agents-why-run-is-not-a-boundary)) |
+| 长期运行的进程 | 服务带着密钥跑几周,同用户任何进程都能读(`/proc/<pid>/environ`) | 不留包装进程的第二份副本,默认关 core dump;同 uid 的读者仍能看到活着的环境变量([原因](docs/zh-CN/security.md#ai-agents-why-run-is-not-a-boundary)) |
 
 **不防**:root、键盘记录器、同用户进程读运行中进程的环境变量——交给进程的东西,同用户的其它进程都能读回来。
 
@@ -50,9 +50,9 @@ envp run prod ./start-server.sh           # 解密注入并运行
 
 **没有密码找回。** 密码丢了,profile 就没了,把密码存进密码管理器。
 
-**要跑服务?** `envp run` 会把自己替换成应用,systemd / supervisord 看到的就是应用本身(同一个 PID、信号、退出码)。systemd、supervisord、php-fpm 的配方在 [services.md](https://github.com/wusende/envpouch/blob/main/docs/services.md)。
+**要跑服务?** `envp run` 会把自己替换成应用,systemd / supervisord 看到的就是应用本身(同一个 PID、信号、退出码)。systemd、supervisord、php-fpm 的配方在 [services.md](docs/zh-CN/services.md)。
 
-**要跑 AI agent?** 它用你的 uid、你的文件权限,`envp run` 挡不住它。把 profile 交给 agent 之前先读 [security.md](https://github.com/wusende/envpouch/blob/main/docs/security.md);短版本:给服务配独立 uid,agent 自己要用的 key 交给 [keysink](https://github.com/wusende/keysink)。
+**要跑 AI agent?** 它用你的 uid、你的文件权限,`envp run` 挡不住它。把 profile 交给 agent 之前先读 [security.md](docs/zh-CN/security.md);短版本:给服务配独立 uid,agent 自己要用的 key 交给 [keysink](https://github.com/wusende/keysink)。
 
 ## 什么时候不该用
 
@@ -66,11 +66,9 @@ envp run prod ./start-server.sh           # 解密注入并运行
 
 | 文档 | 内容 |
 |---|---|
-| [usage.md](https://github.com/wusende/envpouch/blob/main/docs/usage.md) | 全部命令与参数、`run` 语义、脚本/CI、文件位置、shell 补全、已知限制 |
-| [services.md](https://github.com/wusende/envpouch/blob/main/docs/services.md) | systemd、supervisord、php-fpm |
-| [security.md](https://github.com/wusende/envpouch/blob/main/docs/security.md) | 加密了什么、没加密什么、为什么 `run` 不是沙箱、AI agent 怎么办 |
-
-详细文档目前只有英文。
+| [usage.md](docs/zh-CN/usage.md) | 全部命令与参数、`run` 语义、脚本/CI、文件位置、shell 补全、已知限制 |
+| [services.md](docs/zh-CN/services.md) | systemd、supervisord、php-fpm |
+| [security.md](docs/zh-CN/security.md) | 加密了什么、没加密什么、为什么 `run` 不是沙箱、AI agent 怎么办 |
 
 ---
 
