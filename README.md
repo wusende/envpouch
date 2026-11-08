@@ -71,18 +71,18 @@ before pointing an agent at a profile; the short version is a dedicated uid
 for the service, and [keysink](https://github.com/wusende/keysink) for keys an
 agent has to use itself.
 
-## How it compares
+## When this is the wrong tool
 
-| | envpouch | dotenvx | direnv | sops |
-|---|---|---|---|---|
-| Encryption at rest | ✅ per-profile, password-derived | ✅ (private-key based) | ❌ | ✅ (KMS / age key) |
-| No plaintext on disk ever | ✅ | ❌ (encrypts on demand) | ❌ | ✅ |
-| Per-command injection (`run`) | ✅ exec, no wrapper | ✅ | ✅ shell hook | ❌ (decrypts to file) |
-| Needs a key management service | ❌ just a password | ❌ | — | usually |
-| Multi-profile, one binary | ✅ | ✅ | ❌ per-directory | ❌ file-per-operation |
-
-Pick envpouch when you want `.env`-simplicity with real at-rest encryption and
-no infra.
+- **The secrets should live in your shell session.** direnv exports them into
+  the environment and leaves them there; that is its job, and it is the
+  opposite of this.
+- **You only need `.env` out of git.** dotenvx solves that with a key instead
+  of a password; pick whichever key handling you trust more.
+- **A team, or several hosts, share the secrets.** Vault, Infisical, 1Password
+  CLI, a cloud secrets manager. envpouch is one user, one password per profile.
+- **You already have sops/age in the deploy pipeline.** Keep it: envpouch's only
+  edge is needing no host key and no KMS.
+- **The consumer is an AI agent running as you.** See above.
 
 ## Documentation
 
@@ -97,6 +97,8 @@ no infra.
 **envpouch** 把 `.env` 变成密码加密的 profile,再用 `envp run` 注入运行:明文不落盘、不进 git、不进备份,丢了笔记本或误提交时 profile 文件是死的(Argon2id,无密码找回)。不防:root、键盘记录器、同用户进程读运行中进程的环境变量。
 
 给服务用要配独立 uid;给 AI agent 用不要用 `envp run`,它要的 key 交给 [keysink](https://github.com/wusende/keysink)。原因和做法写在英文的 [security.md](https://github.com/wusende/envpouch/blob/main/docs/security.md#ai-agents-why-run-is-not-a-boundary) 里。
+
+什么时候不该用它:环境变量本来就该常驻 shell(direnv)、多人或多机共享(Vault / Infisical)、已经用 sops 管流水线。
 
 ---
 
