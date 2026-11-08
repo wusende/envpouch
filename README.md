@@ -1,5 +1,7 @@
 # envpouch
 
+English | [简体中文](README.zh-CN.md)
+
 [![CI](https://github.com/wusende/envpouch/actions/workflows/ci.yml/badge.svg)](https://github.com/wusende/envpouch/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/envpouch.svg)](https://crates.io/crates/envpouch)
 [![npm](https://img.shields.io/npm/v/envpouch.svg)](https://www.npmjs.com/package/envpouch)
@@ -91,14 +93,6 @@ agent has to use itself.
 | [usage.md](https://github.com/wusende/envpouch/blob/main/docs/usage.md) | every command and flag, `run` semantics, scripts/CI, files, shell completion, limitations |
 | [services.md](https://github.com/wusende/envpouch/blob/main/docs/services.md) | systemd, supervisord, php-fpm |
 | [security.md](https://github.com/wusende/envpouch/blob/main/docs/security.md) | what is encrypted, what is not, why `run` is not a sandbox, what to do about AI agents |
-
-## 中文说明
-
-**envpouch** 把 `.env` 变成密码加密的 profile,再用 `envp run` 注入运行:明文不落盘、不进 git、不进备份,丢了笔记本或误提交时 profile 文件是死的(Argon2id,无密码找回)。不防:root、键盘记录器、同用户进程读运行中进程的环境变量。
-
-给服务用要配独立 uid;给 AI agent 用不要用 `envp run`,它要的 key 交给 [keysink](https://github.com/wusende/keysink)。原因和做法写在英文的 [security.md](https://github.com/wusende/envpouch/blob/main/docs/security.md#ai-agents-why-run-is-not-a-boundary) 里。
-
-什么时候不该用它:环境变量本来就该常驻 shell(direnv)、多人或多机共享(Vault / Infisical)、已经用 sops 管流水线。
 
 ---
 
