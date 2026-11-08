@@ -1,7 +1,7 @@
 {
   "name": "envpouch",
   "version": "0.2.2",
-  "description": "Encrypted environment variable profile manager: import, export and run with password-protected profiles. Command: `envp`.",
+  "description": "Encrypted .env profiles: turn environment variables into password-protected files and run any command with them injected. Plaintext never touches disk, git or backups. Command: `envp`.",
   "license": "MIT",
   "author": "wusende",
   "homepage": "https://github.com/wusende/envpouch#readme",
@@ -15,11 +15,18 @@
   "keywords": [
     "env",
     "dotenv",
+    "dotenvx-alternative",
+    "sops-alternative",
     "secrets",
+    "secrets-management",
     "encryption",
+    "aes-256-gcm",
+    "argon2",
     "cli",
     "environment-variables",
-    "profile"
+    "profile",
+    "env-file",
+    "security"
   ],
   "bin": {
     "envp": "bin/envp.js"

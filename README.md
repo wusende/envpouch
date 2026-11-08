@@ -16,6 +16,37 @@ envp run prod ./start-server.sh
 
 The package is `envpouch`; the command it installs is `envp`.
 
+## Why not just keep the `.env` file
+
+Plaintext `.env` files leak through the three channels nobody watches:
+
+| Leak channel | What happens | envpouch |
+|---|---|---|
+| Git commits | `.env.production` lands in a repo; every fork and clone now holds live secrets | profiles are AES-256-GCM encrypted files; the repo never sees values |
+| Backups & sync | Time Machine, Nextcloud, `rsync` jobs snapshot your home dir, secrets and all | a stolen profile file is inert without the password (Argon2id, no recovery) |
+| Long-lived processes | a service runs with secrets in its environment for weeks; any same-user process can read them (`/proc/<pid>/environ`) | `envp run` **execs** the app in place — no wrapper process, no lingering plaintext; core dumps off by default |
+
+What it does **not** protect against: root, keyloggers, and the same user
+reading a running process's environment. No tool on a general-purpose OS can.
+
+**Running AI agents?** [keysink](https://github.com/wusende/keysink) is the
+companion tool from the same author: a one-way gateway that keeps real API
+keys out of the agent entirely (the agent gets a revocable virtual key).
+envpouch is the file-based, single-command counterpart.
+
+## How it compares
+
+| | envpouch | dotenvx | direnv | sops |
+|---|---|---|---|---|
+| Encryption at rest | ✅ per-profile, password-derived | ✅ (private-key based) | ❌ | ✅ (KMS / age key) |
+| No plaintext on disk ever | ✅ | ❌ (encrypts on demand) | ❌ | ✅ |
+| Per-command injection (`run`) | ✅ exec, no wrapper | ✅ | ✅ shell hook | ❌ (decrypts to file) |
+| Needs a key management service | ❌ just a password | ❌ | — | usually |
+| Multi-profile, one binary | ✅ | ✅ | ❌ per-directory | ❌ file-per-operation |
+
+Pick envpouch when you want `.env`-simplicity with real at-rest encryption
+and no infra.
+
 ## Install
 
 ```sh
@@ -258,3 +289,28 @@ application sees.
   --password-stdin` reads through a buffered pipe: if the command itself
   also reads stdin, buffered bytes can be lost to it (unix reads
   byte-by-byte and leaves the rest of the pipe alone).
+
+---
+
+envpouch is one of two companion tools for keeping secrets out of the wrong
+places. If a leaked-key scare made you set this up — or it quietly saved you
+from rotating every credential you own — a
+[star](https://github.com/wusende/envpouch/stargazers) helps others find it.
+For AI agents specifically, see [keysink](https://github.com/wusende/keysink):
+real API keys never enter the agent's environment at all.
+
+## 中文说明
+
+**envpouch** 把 `.env` 变成密码加密的 profile,再用 `envp run` 注入运行:明文不落盘、不进 git、不进备份。命令与上方英文文档一一对应:
+
+```sh
+envp import prod --from .env.production   # 导入 .env,提示设密码
+envp run prod ./start-server.sh           # 解密注入并运行(原地 exec,不留包装进程)
+envp show prod                            # 查看变量,默认打码
+```
+
+保护范围:丢了笔记本、备份外泄、误提交进 git——没有密码的 profile 文件是死的(Argon2id,无找回)。不防:root、键盘记录器、同用户进程读运行中进程的环境变量。
+
+在跑 AI agent?同作者的 [keysink](https://github.com/wusende/keysink) 是配套工具:单向网关,真 API key 根本不进 agent 环境(agent 只拿可吊销的虚拟 key)。envpouch 是单命令、文件态的那一半。
+
+如果它帮你省下过一次「全量换 key」,去 [点个 star](https://github.com/wusende/envpouch/stargazers)。
