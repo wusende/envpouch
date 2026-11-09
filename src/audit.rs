@@ -1,6 +1,6 @@
 //! Optional audit trail (off by default; enable with `ENVPOUCH_AUDIT=1`).
 //!
-//! Records one line per decrypting invocation: timestamp, subcommand,
+//! Records one line per invocation: timestamp, subcommand,
 //! profile name, and outcome — **never variable keys or values** (spec:
 //! smallest possible secret propagation surface). Written best-effort: a
 //! failed audit write warns on stderr but never fails the command itself.

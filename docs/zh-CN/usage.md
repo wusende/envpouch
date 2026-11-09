@@ -14,17 +14,19 @@
 | 命令 | 作用 |
 |---|---|
 | `import <name> --from <file> [--merge]` | 从 `.env` 文件创建 profile；`--merge` 合并进已有 profile |
-| `import <name> --from-env [--only A,B \| --except A,B]` | 从当前环境导入；默认排除列表（`PATH`、`HOME`、`SSH_*` 等）始终排除 |
+| `import <name> --from-env [--only A,B \| --except A,B]` | 从当前环境导入；默认排除列表（`PATH`、`HOME`、`SSH_*` 等）会被排除——`--only` 绕过它，`--except` 追加 |
 | `show <name> [--reveal]` | 打印变量，默认打码 |
 | `export <name> [-o <file>]` | 把 `.env` 文本打印到 stdout，或写入文件 |
 | `edit <name>` | 在 `$EDITOR` 中编辑 |
-| `set <name> KEY=VALUE...` | 添加或替换键；单独的 `KEY` 会以隐藏输入方式提示输入值 |
+| `set <name> KEY=VALUE...` | 添加或替换键（profile 不存在时自动创建）；单独的 `KEY` 会以隐藏输入方式提示输入值 |
 | `unset <name> KEY...` | 删除键 |
 | `diff <a> <b>` | 比较两个 profile，打码显示 |
 | `run <name> <cmd> [args...]` | 注入变量并运行命令 |
 | `fpm-snippet <name>` | 打印 php-fpm pool 的 `env[...]` 行 |
-| `list` / `rm` / `passwd` / `cp` / `rename` | 列出、删除、改密码、复制、重命名 |
+| `list` / `rm` / `passwd` / `cp` / `rename` | 列出、删除（`rm -f` 跳过确认）、改密码、复制、重命名 |
 | `complete --shell <shell>` | 打印 shell 补全脚本 |
+
+`ls` 和 `mv` 分别是 `list` 和 `rename` 的别名。
 
 在 `set` 中用单独的 `KEY` 是存放机密的安全方式：命令行上的 `KEY=VALUE`
 对同用户进程可见，还会进入 shell 历史。
@@ -75,10 +77,10 @@ profile 存放在 `~/.envpouch/profiles/<name>.envpouch`，每个都是自包含
 
 ```sh
 export ENVPOUCH_HOME=/var/lib/myapp/envpouch   # 把存储移到别处
-export ENVPOUCH_AUDIT=1                        # 把每条解密命令记入 audit.log
+export ENVPOUCH_AUDIT=1                        # 把每条命令记入 audit.log
 ```
 
-审计日志记录时间戳、命令、profile 和退出码，从不记录变量名或值。
+审计日志记录每次调用的时间戳、命令、profile 和退出码，从不记录变量名或值。
 
 ## Shell 补全
 
@@ -90,8 +92,8 @@ envp complete --shell fish  > ~/.config/fish/completions/envp.fish
 
 ## 限制
 
-- export 和 edit 会以规范形式重写 profile（键按字母排序）；源 `.env`
-  的注释和格式不会保留。
+- profile 以规范形式存储（键按字母排序）：import 时就丢掉源 `.env` 的注释和
+  格式；export 与 edit 展示和重写的都是这份规范形式。
 - 编辑器打开期间，`edit` 会保留一个明文临时文件（权限 0600，位于
   `ENVPOUCH_HOME` 下的 0700 目录中）。如果编辑器被杀掉，文件会留在那里，直到下一次 `edit` 清理超过一小时
   的旧文件。（旧版本使用共享的系统临时目录；那些版本留下的残留文件仍会从那里清理。）

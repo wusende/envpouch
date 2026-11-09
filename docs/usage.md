@@ -16,17 +16,19 @@ exclusive).
 | Command | What it does |
 |---|---|
 | `import <name> --from <file> [--merge]` | Create a profile from a `.env` file; `--merge` folds into an existing one |
-| `import <name> --from-env [--only A,B \| --except A,B]` | Import from the current environment; a default list (`PATH`, `HOME`, `SSH_*`, …) is always excluded |
+| `import <name> --from-env [--only A,B \| --except A,B]` | Import from the current environment; a default list (`PATH`, `HOME`, `SSH_*`, …) is excluded — `--only` bypasses it, `--except` adds to it |
 | `show <name> [--reveal]` | Print variables, masked by default |
 | `export <name> [-o <file>]` | Print `.env` text to stdout, or write it to a file |
 | `edit <name>` | Edit in `$EDITOR` |
-| `set <name> KEY=VALUE...` | Add or replace keys; a bare `KEY` prompts for the value with hidden input |
+| `set <name> KEY=VALUE...` | Add or replace keys (creates the profile on first use); a bare `KEY` prompts for the value with hidden input |
 | `unset <name> KEY...` | Remove keys |
 | `diff <a> <b>` | Compare two profiles, masked |
 | `run <name> <cmd> [args...]` | Run a command with the variables injected |
 | `fpm-snippet <name>` | Print php-fpm pool `env[...]` lines |
-| `list` / `rm` / `passwd` / `cp` / `rename` | List, delete, change password, copy, rename |
+| `list` / `rm` / `passwd` / `cp` / `rename` | List, delete (`rm -f` skips the confirmation), change password, copy, rename |
 | `complete --shell <shell>` | Print shell completions |
+
+`ls` and `mv` are aliases of `list` and `rename`.
 
 A bare `KEY` in `set` is the safe way to store secrets: `KEY=VALUE` on the
 command line is visible to same-user processes and lands in shell history.
@@ -91,11 +93,11 @@ encrypted file. Back them up by copying the directory.
 
 ```sh
 export ENVPOUCH_HOME=/var/lib/myapp/envpouch   # move storage elsewhere
-export ENVPOUCH_AUDIT=1                        # log each decrypting command to audit.log
+export ENVPOUCH_AUDIT=1                        # log every command to audit.log
 ```
 
-The audit log records timestamp, command, profile and exit code, never
-variable names or values.
+The audit log records timestamp, command, profile and exit code for every
+invocation, never variable names or values.
 
 ## Shell completion
 
@@ -107,8 +109,9 @@ envp complete --shell fish  > ~/.config/fish/completions/envp.fish
 
 ## Limitations
 
-- Export and edit rewrite the profile in canonical form (alphabetical keys);
-  comments and formatting from the source `.env` are not kept.
+- The stored profile is canonical (alphabetical keys): comments and
+  formatting from the source `.env` are dropped at import; `export` and
+  `edit` show and rewrite that canonical form.
 - `edit` keeps a plaintext temp file (mode 0600, in a 0700 directory under
   `ENVPOUCH_HOME`) while the editor is open. If the editor is killed, the file
   lingers there until the next `edit` removes files older than an hour. (Older

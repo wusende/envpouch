@@ -51,7 +51,7 @@ GitHub Releases 没有 npm 那样的国内镜像，安装路径上放了最不�
 
    ```bash
    export HTTPS_PROXY=http://127.0.0.1:7892   # 本机拉 GitHub 资产用
-   bash scripts/npm-pack.sh                   # 从 GitHub Releases 拉 4 个资产并校验 sha256
+   bash scripts/npm-pack.sh                   # 从 GitHub Releases 拉 6 个资产并校验 sha256
    bash scripts/npm-publish.sh --dry-run
    bash scripts/npm-publish.sh --otp 123456
    ```

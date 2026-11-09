@@ -4,8 +4,10 @@
 
 ## What is encrypted
 
-Profiles are encrypted with AES-256-GCM, keys derived via Argon2id, fresh salt
-and nonce on every write, atomic writes, files mode 0600. This protects data
+Profiles are encrypted with AES-256-GCM, keys derived via Argon2id: a fresh
+nonce on every write, and a fresh salt when the profile is created or the
+password changes (edits keep the profile's salt; GCM requires only nonce
+uniqueness per key). Writes are atomic, files mode 0600. This protects data
 at rest: lost laptops, backups, accidentally committed directories.
 
 On unix, `run` execs the application instead of wrapping it, so decrypted
