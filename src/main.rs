@@ -10,11 +10,13 @@
 //! - `envp diff <a> <b>`                                           compare two profiles (masked)
 //! - `envp run <name> [options] <command> [args...]`                exec with the variables injected (unix)
 //! - `envp list / rm / cp / rename / passwd`                        profile management
+//! - `envp unlock <name> [--ttl <seconds>] / envp lock <name>`       skip the password prompt for a while
 //!
 //! Every decrypting command obtains the password via one of the global
 //! `--password-stdin` flag (one stdin line per prompt — scripts/CI),
 //! `--password-file <file>` (one file line per prompt — services; file must
-//! be mode 0600), or the interactive prompt.
+//! be mode 0600), the interactive prompt, or a cached key from a previous
+//! `envp unlock` (until the TTL expires or `envp lock` removes it).
 
 mod audit;
 mod commands;
@@ -23,6 +25,7 @@ mod envfile;
 mod exclude;
 #[cfg(test)]
 mod fuzz_tests;
+mod keycache;
 mod mask;
 mod profile;
 #[cfg(test)]
@@ -38,7 +41,7 @@ use clap::{CommandFactory, Parser, Subcommand};
     bin_name = "envp",
     version,
     about = "Encrypted environment variable profile manager (project: envpouch)",
-    long_about = "Store .env files as encrypted, password-protected profiles (Argon2id + AES-256-GCM),\nexport them, or run commands with them injected. Every import/show/export/run\nrequires the password.\n\nThe project is called envpouch; the command is envp.",
+    long_about = "Store .env files as encrypted, password-protected profiles (Argon2id + AES-256-GCM),\nexport them, or run commands with them injected. Every import/show/export/run\nrequires the password, unless the profile was unlocked first (`envp unlock`).\n\nThe project is called envpouch; the command is envp.",
     after_help = "Quick start:
   envp import prod --from .env.production   store a .env file as an encrypted profile
   envp run prod ./start-server.sh           run a command with those variables
@@ -194,6 +197,20 @@ enum Commands {
         /// Profile name
         name: String,
     },
+    /// Verify the password once, then let decrypting commands skip the
+    /// prompt until the TTL expires (default 900s) or `envp lock` removes it
+    Unlock {
+        /// Profile name
+        name: String,
+        /// Cache lifetime in seconds (max 2592000 = 30 days)
+        #[arg(long, default_value_t = keycache::DEFAULT_TTL_SECS, value_name = "SECONDS")]
+        ttl: u64,
+    },
+    /// Remove the cached unlock key for a profile (immediately re-lock it)
+    Lock {
+        /// Profile name
+        name: String,
+    },
     /// Print shell completion script for the given shell (stdout)
     Complete {
         /// Target shell
@@ -220,6 +237,8 @@ impl Commands {
             Commands::Cp { src, .. } => ("cp", Some(src.clone())),
             Commands::Rename { src, .. } => ("rename", Some(src.clone())),
             Commands::Passwd { name } => ("passwd", Some(name.clone())),
+            Commands::Unlock { name, .. } => ("unlock", Some(name.clone())),
+            Commands::Lock { name } => ("lock", Some(name.clone())),
             Commands::Complete { .. } => ("complete", None),
         }
     }
@@ -288,6 +307,8 @@ fn dispatch(password_stdin: bool, password_file: Option<PathBuf>, command: Comma
         Commands::Cp { src, dst } => commands::cp(&src, &dst).map(|_| 0),
         Commands::Rename { src, dst } => commands::rename(&src, &dst).map(|_| 0),
         Commands::Passwd { name } => commands::passwd(&name, &mut input).map(|_| 0),
+        Commands::Unlock { name, ttl } => commands::unlock(&name, ttl, &mut input).map(|_| 0),
+        Commands::Lock { name } => commands::lock(&name).map(|_| 0),
         Commands::Complete { shell } => {
             let mut buf = Vec::new();
             clap_complete::generate(shell, &mut Cli::command(), "envp", &mut buf);

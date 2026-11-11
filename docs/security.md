@@ -20,6 +20,13 @@ shrinks what the application sees, not what a same-uid reader can take. The
 next section is about that gap, because it is the one that bites when an AI
 agent is the same-user process.
 
+`envp unlock` trades a little of that at-rest security for convenience:
+within the TTL window the profile's derived key sits on disk (mode 0600,
+next to the profile), so malware running as your user — already assumed
+out of scope above — could decrypt the profile without the password until
+`envp lock` or expiry removes the entry. The password itself is never
+written to the cache.
+
 ## AI agents: why `run` is not a boundary
 
 A human typing `cat` is not the threat model here. An agent with a shell is:

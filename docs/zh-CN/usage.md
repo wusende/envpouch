@@ -8,7 +8,7 @@
 
 ## 命令
 
-除 `list`、`rm`、`cp`、`rename` 和 `complete` 外，所有命令都需要密码。
+除 `list`、`rm`、`cp`、`rename`、`lock` 和 `complete` 外，所有命令都需要密码——除非该 profile 已先解锁（`envp unlock`）。
 `--password-stdin` 和 `--password-file` 是全局旗标，对每条命令都有效，放在子命令前后均可（两者互斥）。
 
 | 命令 | 作用 |
@@ -24,6 +24,8 @@
 | `run <name> <cmd> [args...]` | 注入变量并运行命令 |
 | `fpm-snippet <name>` | 打印 php-fpm pool 的 `env[...]` 行 |
 | `list` / `rm` / `passwd` / `cp` / `rename` | 列出、删除（`rm -f` 跳过确认）、改密码、复制、重命名 |
+| `unlock <name> [--ttl <seconds>]` | 验证一次密码，之后其他命令在 TTL 内跳过密码提示（默认 900 秒） |
+| `lock <name>` | 立即删除缓存的解锁密钥 |
 | `complete --shell <shell>` | 打印 shell 补全脚本 |
 
 `ls` 和 `mv` 分别是 `list` 和 `rename` 的别名。
@@ -59,6 +61,32 @@ envp run prod --allow-core-dumps ./srv   # 保留 core dump（LimitCORE= 生效�
   `--allow-core-dumps` 则保留守护进程的限制（systemd `LimitCORE=`、
   `ulimit -c`）。
 
+## unlock / lock
+
+开发时每条命令都输密码很磨人。`unlock` 验证一次密码，然后把该 profile
+的派生密钥（绝不是密码本身）缓存一段时间：
+
+```sh
+envp unlock prod                 # 缓存 15 分钟（默认 TTL）
+envp unlock prod --ttl 3600      # 自定义窗口，最长 30 天
+envp show prod                   # 无提示——也没有 Argon2 过程
+envp run prod ./deploy.sh        # 同上
+envp lock prod                   # 立即删除缓存
+```
+
+- 只有未带 `--password-stdin` / `--password-file` 的命令才使用缓存，
+  脚本和服务保持每提示一行、顺序确定的既有行为。
+- 缓存与 profile 相邻存放
+  （`~/.envpouch/profiles/<name>.envpouch.unlock`，位于同一 0700 目录，
+  权限 0600），且只保存派生密钥——只够解密这一个 profile，仅此而已。
+  `passwd`、`rm` 和 `rename` 会使其失效，过期条目会在下一次命令查看时删除。
+- 在窗口期内，`passwd` 同样跳过旧密码校验——缓存密钥本身就是证明——
+  只提示输入新密码。（`rm` 本来就不需要密码。）
+- `envp lock <name>` 是幂等的：对已锁定的 profile 执行也是干净的成功。
+
+这一安全折衷——派生密钥在 TTL 内落盘——见
+[security.md](security.md#加密了什么)。
+
 ## 脚本 / CI
 
 ```sh
@@ -73,7 +101,7 @@ envp run prod --password-file /etc/myapp/envp.pass ./deploy.sh   # 服务
 
 ## 文件
 
-profile 存放在 `~/.envpouch/profiles/<name>.envpouch`，每个都是自包含的加密文件。备份就是拷贝这个目录。
+profile 存放在 `~/.envpouch/profiles/<name>.envpouch`，每个都是自包含的加密文件。备份就是拷这个目录。旁边还有 sidecar 文件：`<name>.envpouch.lock`（写锁）和 `<name>.envpouch.unlock`（`envp unlock` 的缓存密钥，权限 0600）。
 
 ```sh
 export ENVPOUCH_HOME=/var/lib/myapp/envpouch   # 把存储移到别处

@@ -56,7 +56,9 @@ envp run prod ./start-server.sh           # decrypt and run with them set
 Each profile is one encrypted file under `~/.envpouch/profiles/` — copy that
 directory to back everything up. Every decrypting command takes its password
 from the interactive prompt, `--password-stdin`, or `--password-file <file>`
-(owner-only, 0600) for services.
+(owner-only, 0600) for services. For repeated local use, `envp unlock` caches
+the verified key for a while so commands skip the prompt
+([usage.md](docs/usage.md#unlock--lock)).
 
 **There is no password recovery.** A lost password means the profile is gone.
 Keep passwords in a password manager.

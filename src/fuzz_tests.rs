@@ -157,6 +157,53 @@ fn fuzz_read_meta_never_panics() {
 }
 
 // ---------------------------------------------------------------------------
+// keycache surfaces
+// ---------------------------------------------------------------------------
+
+/// The unlock-cache entry parser must treat any input as Ok-or-clean-Err:
+/// it runs on attacker-writable disk state before every cached decrypt.
+#[test]
+fn fuzz_keycache_entry_never_panics() {
+    let mut rng = XorShift::new(0x5EED_0003);
+
+    // 1) pure random bytes
+    for _ in 0..400 {
+        let raw = rand_bytes(&mut rng, 128);
+        let r = no_panic(|| crate::keycache::parse_entry(&raw));
+        assert!(r.is_ok(), "parse_entry panicked: {}", r.unwrap_err());
+    }
+
+    // 2) bit flips of a valid entry at every byte offset (mod 7 stride)
+    let valid = crate::keycache::encode_entry(
+        u64::MAX,
+        [7u8; crypto::SALT_LEN],
+        crypto::KdfParams::default(),
+        [9u8; crypto::KEY_LEN],
+    );
+    for off in (0..valid.len()).step_by(7) {
+        let mut raw = valid.clone();
+        raw[off] ^= 0x20;
+        let r = no_panic(|| crate::keycache::parse_entry(&raw));
+        assert!(
+            r.is_ok(),
+            "parse_entry panicked on bit flip at {off}: {}",
+            r.unwrap_err()
+        );
+    }
+
+    // 3) truncations at every length class
+    for cut in [0, 1, 8, 9, 17, 33, 45, 57, 76, 77, 100] {
+        let end = cut.min(valid.len());
+        let r = no_panic(|| crate::keycache::parse_entry(&valid[..end]));
+        assert!(
+            r.is_ok(),
+            "parse_entry panicked on truncation to {end}: {}",
+            r.unwrap_err()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // envfile surfaces
 // ---------------------------------------------------------------------------
 

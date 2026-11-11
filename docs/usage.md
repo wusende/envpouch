@@ -8,8 +8,9 @@ see [security.md](security.md).
 
 ## Commands
 
-All commands except `list`, `rm`, `cp`, `rename` and `complete` need the
-password. `--password-stdin` and `--password-file` are global flags that work
+All commands except `list`, `rm`, `cp`, `rename`, `lock` and `complete` need
+the password — unless the profile was unlocked first (`envp unlock`).
+`--password-stdin` and `--password-file` are global flags that work
 with every one of them, before or after the subcommand (the two are mutually
 exclusive).
 
@@ -26,6 +27,8 @@ exclusive).
 | `run <name> <cmd> [args...]` | Run a command with the variables injected |
 | `fpm-snippet <name>` | Print php-fpm pool `env[...]` lines |
 | `list` / `rm` / `passwd` / `cp` / `rename` | List, delete (`rm -f` skips the confirmation), change password, copy, rename |
+| `unlock <name> [--ttl <seconds>]` | Verify the password once, then let other commands skip the prompt until the TTL expires (default 900s) |
+| `lock <name>` | Remove the cached unlock key immediately |
 | `complete --shell <shell>` | Print shell completions |
 
 `ls` and `mv` are aliases of `list` and `rename`.
@@ -71,6 +74,37 @@ supervision.
   memory that holds the decrypted variables); `--allow-core-dumps` keeps the
   supervisor's limits instead (systemd `LimitCORE=`, `ulimit -c`).
 
+## unlock / lock
+
+Typing the password for every command adds up during development.
+`unlock` verifies the password once and caches the profile's derived key
+(never the password itself) for a while:
+
+```sh
+envp unlock prod                 # cache for 15 minutes (default TTL)
+envp unlock prod --ttl 3600      # custom window, max 30 days
+envp show prod                   # no prompt — and no Argon2 pass
+envp run prod ./deploy.sh        # same
+envp lock prod                   # remove the cache immediately
+```
+
+- Only commands run without `--password-stdin` / `--password-file` use
+  the cache, so scripts and services keep their deterministic
+  one-line-per-prompt behavior.
+- The cache lives next to the profile
+  (`~/.envpouch/profiles/<name>.envpouch.unlock`, mode 0600 in the same
+  0700 directory) and holds the derived key only — enough to decrypt that
+  one profile, nothing more. `passwd`, `rm` and `rename` invalidate it,
+  and expired entries are deleted the next time a command looks.
+- Within the window, `passwd` skips the old-password check too — the
+  cached key already proves it — and only asks for the new password.
+  (`rm` never asked for a password in the first place.)
+- `envp lock <name>` is idempotent: running it on a locked profile is a
+  clean success.
+
+The security tradeoff — a derived key sitting on disk for the TTL — is
+covered in [security.md](security.md#what-is-encrypted).
+
 ## Scripts / CI
 
 ```sh
@@ -89,7 +123,9 @@ refuses group/world-readable files (chmod 600).
 ## Files
 
 Profiles live in `~/.envpouch/profiles/<name>.envpouch`, each a self-contained
-encrypted file. Back them up by copying the directory.
+encrypted file. Back them up by copying the directory. Sidecars live next to
+them: `<name>.envpouch.lock` (the write lock) and `<name>.envpouch.unlock`
+(the cached key from `envp unlock`, mode 0600).
 
 ```sh
 export ENVPOUCH_HOME=/var/lib/myapp/envpouch   # move storage elsewhere

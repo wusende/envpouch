@@ -124,3 +124,77 @@ fn run_preserves_signal_exit_status() {
 
     assert_eq!(status.signal(), Some(libc::SIGTERM));
 }
+
+/// `unlock` caches the verified key so `show` runs with no password source
+/// at all; `lock` removes the cache again (file-level proof: the sidecar
+/// appears and disappears). The re-prompt itself needs a tty, so the
+/// "prompts again after lock" behavior is covered by scripts/fuzz_cli.sh
+/// (no-tty prompt failure) plus the unit tests, not here.
+#[test]
+fn unlock_cache_answers_and_lock_removes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let pw = make_profile(dir.path());
+    let sidecar = home.join("profiles").join("svc.envpouch.unlock");
+    assert!(!sidecar.exists(), "no cache entry before unlock");
+
+    let out = Command::new(envp_bin())
+        .env("ENVPOUCH_HOME", &home)
+        .arg("--password-file")
+        .arg(&pw)
+        .args(["unlock", "svc", "--ttl", "600"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "unlock failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(sidecar.exists(), "unlock must write the cache sidecar");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("unlocked"), "{stdout}");
+    assert!(stdout.contains("expires"), "{stdout}");
+
+    // No password source at all — the cache must answer, prompting nothing
+    let out = Command::new(envp_bin())
+        .env("ENVPOUCH_HOME", &home)
+        .stdin(Stdio::null())
+        .args(["show", "svc"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "cached show failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("KEY"));
+
+    let out = Command::new(envp_bin())
+        .env("ENVPOUCH_HOME", &home)
+        .args(["lock", "svc"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "lock failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!sidecar.exists(), "lock must remove the cache sidecar");
+
+    // Locked again: a wrong password must be rejected by the profile itself
+    // (deterministic, tty-free proof that the cache no longer answers)
+    let bad = dir.path().join("bad-pw");
+    std::fs::write(&bad, "wrong-password\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let out = Command::new(envp_bin())
+        .env("ENVPOUCH_HOME", &home)
+        .arg("--password-file")
+        .arg(&bad)
+        .args(["show", "svc"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("wrong password"), "{stderr}");
+}

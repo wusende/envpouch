@@ -14,6 +14,7 @@ use zeroize::Zeroizing;
 use crate::crypto::{self, FileMeta};
 use crate::envfile::{self, EnvVars};
 use crate::exclude;
+use crate::keycache;
 use crate::mask;
 use crate::profile;
 
@@ -150,8 +151,29 @@ fn obtain_password(input: &mut PasswordInput, prompt: &str) -> Result<Zeroizing<
 /// Open an existing profile: read it, acquire the password (flag source or
 /// prompt), decrypt, parse. The derived key is returned so callers that
 /// re-save can skip a second KDF pass. Shared by every decrypting command.
+///
+/// Unlock cache: without an explicit password source, a cached key from
+/// `envp unlock` decrypts the profile directly — no prompt, no KDF pass.
+/// Explicit flag sources bypass the cache so scripted runs stay
+/// deterministic (one line per prompt, in prompt order).
 fn open_profile(name: &str, input: &mut PasswordInput) -> Result<(EnvVars, crypto::DerivedKey)> {
     let blob = profile::read(name)?;
+    if !input.is_explicit() {
+        if let Some(derived) = keycache::lookup(name) {
+            match crypto::decrypt_with_key(&blob, &derived) {
+                Ok(decrypted) => {
+                    let vars = EnvVars::from_json(&decrypted.plaintext)?;
+                    return Ok((vars, derived));
+                }
+                // Stale (password changed, profile re-imported) or undecryptable:
+                // drop the entry and fall through to the password path, which
+                // produces the canonical error for whatever is actually wrong.
+                Err(_) => {
+                    let _ = keycache::clear(name);
+                }
+            }
+        }
+    }
     let password = obtain_password(input, &format!("Enter password for profile '{name}': "))?;
     let (decrypted, derived) = crypto::decrypt_derived(&blob, password.as_str())?;
     let vars = EnvVars::from_json(&decrypted.plaintext)?;
@@ -1177,6 +1199,8 @@ pub fn rm(name: &str, yes: bool) -> Result<()> {
         }
     }
     profile::delete(name)?;
+    // The profile is gone; its cached unlock key would be stale either way
+    let _ = keycache::clear(name);
     out_line(format!("Profile '{name}' deleted"))
 }
 
@@ -1226,6 +1250,8 @@ pub fn rename(src: &str, dst: &str) -> Result<()> {
         bail!("profile '{dst}' already exists (see `envp list`)");
     }
     profile::rename(src, dst)?;
+    // The cache is keyed by profile name — the old entry must not carry over
+    let _ = keycache::clear(src);
     out_line(format!("Profile '{src}' renamed to '{dst}'"))
 }
 
@@ -1238,7 +1264,43 @@ pub fn passwd(name: &str, input: &mut PasswordInput) -> Result<()> {
     let new = new_password(input)?;
     let derived = crypto::DerivedKey::fresh(new.as_str())?;
     save_profile(name, &vars, &derived)?;
+    // The cached key (if any) was derived from the old salt — stale now
+    let _ = keycache::clear(name);
     out_line(format!("Password changed for profile '{name}'"))
+}
+
+/// `envp unlock <name> [--ttl <seconds>]`: verify the real password by
+/// decrypting, then cache the derived key so decrypting commands skip the
+/// prompt within the TTL window. A local file cache has no unavailable-OS-
+/// service mode (unlike the removed keychain cache), so a store failure is
+/// a hard error (§0 fail fast).
+pub fn unlock(name: &str, ttl: u64, input: &mut PasswordInput) -> Result<()> {
+    profile::validate_name(name)?;
+    // Usage errors fail fast — before any prompt
+    if ttl == 0 || ttl > keycache::MAX_TTL_SECS {
+        bail!(
+            "--ttl must be between 1 and {} seconds (30 days)",
+            keycache::MAX_TTL_SECS
+        );
+    }
+    let blob = profile::read(name)?;
+    // unlock verifies the real password: never the cache itself
+    let password = obtain_password(input, &format!("Enter password for profile '{name}': "))?;
+    let (_, derived) = crypto::decrypt_derived(&blob, password.as_str())?;
+    keycache::store(name, &derived, ttl)?;
+    let expires_at = now_unix()? + ttl;
+    out_line(format!(
+        "Profile '{name}' unlocked (cached key expires {})",
+        format_unix(expires_at)
+    ))
+}
+
+/// `envp lock <name>`: remove the cached key. Missing entries count as
+/// success, so `envp lock` is safe to run when nothing is unlocked.
+pub fn lock(name: &str) -> Result<()> {
+    profile::validate_name(name)?;
+    keycache::clear(name)?;
+    out_line(format!("Profile '{name}' locked (cached key removed)"))
 }
 
 fn format_unix(ts: u64) -> String {
@@ -1540,6 +1602,152 @@ mod tests {
         let err = set("lockt", &["B=2".into()], &mut input).unwrap_err();
         assert!(err.to_string().contains("busy"), "{err}");
         drop(guard);
+
+        crate::testutil::clear_envpouch_home();
+    }
+
+    // --- unlock cache ---------------------------------------------------
+
+    /// Password-file fixture: 0600 on unix (the mode check is skipped on
+    /// other platforms), one password per line, in prompt order.
+    #[cfg(unix)]
+    fn write_pw_file(dir: &std::path::Path, name: &str, lines: &[&str]) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(&p, format!("{}\n", lines.join("\n"))).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        p
+    }
+
+    /// The unlock promise: after `unlock`, a command with no password source
+    /// at all succeeds (the cached key answers; a prompt would fail — tests
+    /// have no tty contract — proving no prompt happened). `lock` takes the
+    /// entry away again.
+    #[cfg(unix)]
+    #[test]
+    fn unlock_lets_show_skip_the_password_and_lock_restores_it() {
+        let _env = crate::testutil::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::testutil::set_envpouch_home(dir.path());
+
+        let pw = write_pw_file(dir.path(), "pw1", &["cache-test-password"]);
+        let mut setup = PasswordInput::from_flags(false, Some(pw.clone())).unwrap();
+        set("uc1", &["A=1".into()], &mut setup).expect("profile created");
+
+        let mut unlock_in = PasswordInput::from_flags(false, Some(pw)).unwrap();
+        unlock("uc1", keycache::DEFAULT_TTL_SECS, &mut unlock_in).expect("unlock caches the key");
+        assert!(keycache::lookup("uc1").is_some());
+
+        let mut no_input = PasswordInput::from_flags(false, None).unwrap();
+        show("uc1", false, &mut no_input).expect("show runs from the cached key");
+
+        lock("uc1").expect("lock removes the entry");
+        assert!(keycache::lookup("uc1").is_none());
+
+        crate::testutil::clear_envpouch_home();
+    }
+
+    /// `passwd` invalidates the cached key: the entry was derived from the
+    /// old salt, so keeping it would either fail or — worse — answer for a
+    /// profile that no longer matches.
+    #[cfg(unix)]
+    #[test]
+    fn passwd_invalidates_the_cached_key() {
+        let _env = crate::testutil::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::testutil::set_envpouch_home(dir.path());
+
+        let pw = write_pw_file(dir.path(), "pw1", &["old-password-1"]);
+        let mut setup = PasswordInput::from_flags(false, Some(pw.clone())).unwrap();
+        set("uc2", &["A=1".into()], &mut setup).expect("profile created");
+
+        let mut unlock_in = PasswordInput::from_flags(false, Some(pw)).unwrap();
+        unlock("uc2", keycache::DEFAULT_TTL_SECS, &mut unlock_in).unwrap();
+        assert!(keycache::lookup("uc2").is_some());
+
+        // passwd consumes two lines: current password, then the new one
+        let pw2 = write_pw_file(dir.path(), "pw2", &["old-password-1", "new-password-2"]);
+        let mut input = PasswordInput::from_flags(false, Some(pw2)).unwrap();
+        passwd("uc2", &mut input).expect("password changed");
+        assert!(
+            keycache::lookup("uc2").is_none(),
+            "cached key must be dropped"
+        );
+
+        // The profile itself now answers only to the new password
+        let pw3 = write_pw_file(dir.path(), "pw3", &["new-password-2"]);
+        let mut input = PasswordInput::from_flags(false, Some(pw3)).unwrap();
+        show("uc2", false, &mut input).expect("new password works");
+
+        crate::testutil::clear_envpouch_home();
+    }
+
+    /// The cache is keyed by profile name: `rename` must not let the old
+    /// name's entry carry over, and `rm` must not leave an orphan.
+    #[cfg(unix)]
+    #[test]
+    fn rename_and_rm_clear_the_cached_key() {
+        let _env = crate::testutil::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::testutil::set_envpouch_home(dir.path());
+
+        let pw = write_pw_file(dir.path(), "pw1", &["cache-test-password"]);
+        let mut setup = PasswordInput::from_flags(false, Some(pw.clone())).unwrap();
+        set("uc3", &["A=1".into()], &mut setup).unwrap();
+        let mut unlock_in = PasswordInput::from_flags(false, Some(pw.clone())).unwrap();
+        unlock("uc3", keycache::DEFAULT_TTL_SECS, &mut unlock_in).unwrap();
+
+        rename("uc3", "uc4").unwrap();
+        assert!(
+            keycache::lookup("uc3").is_none(),
+            "old name must not keep a cache entry"
+        );
+
+        let mut unlock_in = PasswordInput::from_flags(false, Some(pw)).unwrap();
+        unlock("uc4", keycache::DEFAULT_TTL_SECS, &mut unlock_in).unwrap();
+        assert!(keycache::lookup("uc4").is_some());
+        rm("uc4", true).unwrap();
+        assert!(
+            keycache::lookup("uc4").is_none(),
+            "rm must not leave an orphan"
+        );
+
+        crate::testutil::clear_envpouch_home();
+    }
+
+    /// An explicit password source must ignore whatever the cache holds —
+    /// even a poisoned entry stored under this profile's name.
+    #[cfg(unix)]
+    #[test]
+    fn explicit_password_source_bypasses_the_cache() {
+        let _env = crate::testutil::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::testutil::set_envpouch_home(dir.path());
+
+        // Two profiles, two salts
+        let pw_a = write_pw_file(dir.path(), "pwa", &["password-a-1"]);
+        let pw_b = write_pw_file(dir.path(), "pwb", &["password-b-2"]);
+        let mut in_a = PasswordInput::from_flags(false, Some(pw_a.clone())).unwrap();
+        set("sfa", &["A=1".into()], &mut in_a).unwrap();
+        let mut in_b = PasswordInput::from_flags(false, Some(pw_b.clone())).unwrap();
+        set("sfb", &["B=2".into()], &mut in_b).unwrap();
+
+        // Poison: cache profile A's key under profile B's name
+        let blob_a = profile::read("sfa").unwrap();
+        let (_, derived_a) = crypto::decrypt_derived(&blob_a, "password-a-1").unwrap();
+        keycache::store("sfb", &derived_a, keycache::DEFAULT_TTL_SECS).unwrap();
+
+        // Explicit source wins
+        let mut in_b2 = PasswordInput::from_flags(false, Some(pw_b)).unwrap();
+        show("sfb", false, &mut in_b2).expect("explicit source ignores the poisoned cache");
+
+        // And the poisoned entry cannot decrypt B's profile: the salt/params
+        // mismatch against the header is what triggers the prompt fallback
+        let blob_b = profile::read("sfb").unwrap();
+        let err = crypto::decrypt_with_key(&blob_b, &derived_a)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cached key does not match"), "{err}");
 
         crate::testutil::clear_envpouch_home();
     }

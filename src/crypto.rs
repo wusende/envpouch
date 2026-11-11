@@ -22,9 +22,11 @@ use zeroize::Zeroizing;
 /// on it only changes together with a format version bump.
 pub const MAGIC: &[u8; 8] = b"ENVPOUCH";
 pub const FORMAT_VERSION: u8 = 1;
-const SALT_LEN: usize = 16;
+/// Shared with the unlock cache, which serializes the derived key + salt.
+pub(crate) const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
-const KEY_LEN: usize = 32;
+/// Shared with the unlock cache, which serializes the derived key + salt.
+pub(crate) const KEY_LEN: usize = 32;
 /// GCM authentication tag length (fixed 128 bits)
 const TAG_LEN: usize = 16;
 /// Header size: magic + version(1) + salt(16) + kdf params(12) + nonce(12) + var_count(4) + updated_at(8)
@@ -78,6 +80,34 @@ impl DerivedKey {
         fill(&mut salt).map_err(|e| anyhow!("failed to generate random salt: {e}"))?;
         let key = derive_key(password, &salt, params)?;
         Ok(Self { key, salt, params })
+    }
+
+    /// Reassemble a derived key from cached parts (unlock cache). The params
+    /// are validated like file headers are, so a corrupt cache entry cannot
+    /// smuggle in oversized KDF values or a bogus salt.
+    pub fn from_parts(key: [u8; KEY_LEN], salt: [u8; SALT_LEN], params: KdfParams) -> Result<Self> {
+        validate_kdf_params(params.m_cost, params.t_cost, params.p_cost)?;
+        Ok(Self {
+            key: Zeroizing::new(key),
+            salt,
+            params,
+        })
+    }
+
+    /// Salt the key was derived with (cached alongside the key by `envp unlock`).
+    pub fn salt(&self) -> &[u8; SALT_LEN] {
+        &self.salt
+    }
+
+    /// KDF params the key was derived with (same purpose as `salt`).
+    pub fn params(&self) -> &KdfParams {
+        &self.params
+    }
+
+    /// Raw key bytes, for the unlock cache serialization. Crate-internal by
+    /// design: outside the crate the key never leaves `DerivedKey`.
+    pub(crate) fn key_bytes(&self) -> &[u8; KEY_LEN] {
+        &self.key
     }
 }
 
@@ -177,9 +207,17 @@ pub fn decrypt(blob: &[u8], password: &str) -> Result<Decrypted> {
     Ok(decrypt_derived(blob, password)?.0)
 }
 
-/// Decrypt and also return the derived key, so a verified password can
-/// re-encrypt the profile without a second KDF pass.
-pub fn decrypt_derived(blob: &[u8], password: &str) -> Result<(Decrypted, DerivedKey)> {
+/// Parsed plaintext header of a profile file: everything needed to decrypt.
+struct ParsedHeader {
+    salt: [u8; SALT_LEN],
+    params: KdfParams,
+    nonce: [u8; NONCE_LEN],
+    var_count: u32,
+    updated_at: u64,
+}
+
+/// Parse and validate the fixed-size header (magic, version, KDF params).
+fn parse_header(blob: &[u8]) -> Result<ParsedHeader> {
     if blob.len() < HEADER_LEN + TAG_LEN {
         bail!("file too small to be a valid envpouch profile");
     }
@@ -211,18 +249,26 @@ pub fn decrypt_derived(blob: &[u8], password: &str) -> Result<(Decrypted, Derive
     debug_assert_eq!(off + 8, HEADER_LEN);
 
     validate_kdf_params(m_cost, t_cost, p_cost)?;
-    let params = KdfParams {
-        m_cost,
-        t_cost,
-        p_cost,
-    };
+    Ok(ParsedHeader {
+        salt,
+        params: KdfParams {
+            m_cost,
+            t_cost,
+            p_cost,
+        },
+        nonce,
+        var_count,
+        updated_at,
+    })
+}
 
+/// GCM-decrypt the payload with the header as AAD. Caller has validated size.
+fn decrypt_payload(blob: &[u8], key: &[u8; KEY_LEN], hdr: &ParsedHeader) -> Result<Decrypted> {
     let (header, ciphertext) = blob.split_at(HEADER_LEN);
-    let key = derive_key(password, &salt, params)?;
     let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key));
     let plaintext = cipher
         .decrypt(
-            &Nonce::from(nonce),
+            &Nonce::from(hdr.nonce),
             Payload {
                 msg: ciphertext,
                 aad: header,
@@ -230,16 +276,39 @@ pub fn decrypt_derived(blob: &[u8], password: &str) -> Result<(Decrypted, Derive
         )
         .map_err(|_| anyhow!("wrong password or profile file is corrupted"))?;
 
-    Ok((
-        Decrypted {
-            plaintext: Zeroizing::new(plaintext),
-            meta: FileMeta {
-                var_count,
-                updated_at,
-            },
+    Ok(Decrypted {
+        plaintext: Zeroizing::new(plaintext),
+        meta: FileMeta {
+            var_count: hdr.var_count,
+            updated_at: hdr.updated_at,
         },
-        DerivedKey { key, salt, params },
-    ))
+    })
+}
+
+/// Decrypt and also return the derived key, so a verified password can
+/// re-encrypt the profile without a second KDF pass.
+pub fn decrypt_derived(blob: &[u8], password: &str) -> Result<(Decrypted, DerivedKey)> {
+    let hdr = parse_header(blob)?;
+    let key = derive_key(password, &hdr.salt, hdr.params)?;
+    let decrypted = decrypt_payload(blob, &key, &hdr)?;
+    let derived = DerivedKey {
+        key,
+        salt: hdr.salt,
+        params: hdr.params,
+    };
+    Ok((decrypted, derived))
+}
+
+/// Decrypt with a cached derived key (unlock cache), skipping the KDF pass.
+/// Errors distinctly when the profile's salt/params no longer match the
+/// cached key (the password changed since it was cached), so callers can
+/// treat that as a cache miss and fall back to the password path.
+pub fn decrypt_with_key(blob: &[u8], derived: &DerivedKey) -> Result<Decrypted> {
+    let hdr = parse_header(blob)?;
+    if hdr.salt != *derived.salt() || hdr.params != *derived.params() {
+        bail!("cached key does not match this profile (password changed? re-run `envp unlock`)");
+    }
+    decrypt_payload(blob, &derived.key, &hdr)
 }
 
 /// Parse only the plaintext header metadata (used by `list`, no password needed).

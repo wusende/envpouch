@@ -164,7 +164,7 @@ fn set_permissions(path: &Path, mode: u32) -> Result<()> {
 
 /// Create a file that is owner-only from its first byte on unix — no brief
 /// wide-permission window between create and chmod.
-fn create_private(path: &Path) -> std::io::Result<fs::File> {
+pub(crate) fn create_private(path: &Path) -> std::io::Result<fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -186,7 +186,7 @@ fn create_private(path: &Path) -> std::io::Result<fs::File> {
 /// without this, a crash can roll the name back to the previous file (e.g.
 /// after `passwd`, the old password would work again). Failure only warns:
 /// atomicity is the hard guarantee, durability the best effort.
-fn sync_dir_best_effort(dir: &Path) {
+pub(crate) fn sync_dir_best_effort(dir: &Path) {
     #[cfg(unix)]
     if let Err(e) = fs::File::open(dir).and_then(|d| d.sync_all()) {
         eprintln!("warning: could not fsync directory {}: {e}", dir.display());

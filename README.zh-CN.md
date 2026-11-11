@@ -46,7 +46,7 @@ envp show prod                            # 看变量,默认打码
 envp run prod ./start-server.sh           # 解密注入并运行
 ```
 
-每个 profile 是 `~/.envpouch/profiles/` 下的一个加密文件,备份就是拷这个目录。需要解密时,密码来自交互提示、`--password-stdin`,或给服务用的 `--password-file`(仅属主可读,0600)。
+每个 profile 是 `~/.envpouch/profiles/` 下的一个加密文件,备份就是拷这个目录。需要解密时,密码来自交互提示、`--password-stdin`,或给服务用的 `--password-file`(仅属主可读,0600)。本地反复使用时,`envp unlock` 可以把验证过的密钥缓存一段时间,让命令跳过密码提示(见 [usage.md](docs/zh-CN/usage.md#unlock--lock))。
 
 **没有密码找回。** 密码丢了,profile 就没了,把密码存进密码管理器。
 

@@ -106,8 +106,30 @@ head -c 1048576 /dev/urandom >"$WORK/big.env"
 out="$("$BIN" import bigprof --from "$WORK/big.env" 2>&1 <<<"$PASS")"
 check "$?" "$out"
 
+echo "== 6) unlock / lock: cached key answers; lock restores the password path =="
+import_interactive ulprof /dev/null
+out="$("$BIN" unlock ulprof --password-stdin --ttl 60 2>&1 <<<"$PASS")"
+check "$?" "$out"
+# No password source, no tty: only the cached key can answer — must succeed
+out="$("$BIN" show ulprof 2>&1 </dev/null)"
+rc=$?
+check "$rc" "$out"
+[ "$rc" -eq 0 ] || { echo "[unlock] cached show failed: $out"; FAIL=1; }
+# Explicit source bypasses the cache: a wrong password must be rejected
+out="$("$BIN" show ulprof --password-stdin 2>&1 <<<"not-the-password")"
+rc=$?
+check "$rc" "$out"
+[ "$rc" -eq 1 ] || { echo "[unlock] explicit source must bypass the cache"; FAIL=1; }
+# lock removes the entry: with no tty the prompt path can only fail cleanly
+out="$("$BIN" lock ulprof 2>&1)"
+check "$?" "$out"
+out="$("$BIN" show ulprof 2>&1 </dev/null)"
+rc=$?
+check "$rc" "$out"
+[ "$rc" -eq 1 ] || { echo "[unlock] show must prompt again after lock"; FAIL=1; }
+
 echo "== cleanup =="
-for p in victim emptyprof bigprof fz1 fz2 fz3 junk1 junk2; do
+for p in victim emptyprof bigprof fz1 fz2 fz3 junk1 junk2 ulprof; do
   printf 'y\n' | "$BIN" rm "$p" >/dev/null 2>&1
 done
 for i in 0 1 2 3 4 5 6 7; do

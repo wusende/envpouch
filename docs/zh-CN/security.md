@@ -13,6 +13,8 @@ profile 或改密码时才换新的 salt（编辑类操作沿用原 salt；GCM �
 它防不住同用户进程读取运行中进程的环境（`/proc/<pid>/environ`、
 `ps eww`）、root 或键盘记录器。`--clean` 缩小的是应用能看到的内容，而不是同 uid 读者能拿到的内容。下一节讲的就是这个缺口，因为当 AI agent 就是那个同用户进程时，被咬的就是这里。
 
+`envp unlock` 用一点静态数据安全换便利：TTL 窗口内，profile 的派生密钥会落盘（权限 0600，与 profile 相邻），因此以你的用户身份运行的恶意软件——上文已假定在范围之外——在 `envp lock` 或过期清除条目之前，无需密码即可解密 profile。密码本身从不写入缓存。
+
 <a id="ai-agents-why-run-is-not-a-boundary"></a>
 
 ## AI agent：为什么 `run` 不是边界
