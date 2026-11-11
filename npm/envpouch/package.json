@@ -1,6 +1,6 @@
 {
   "name": "envpouch",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Encrypted .env profiles: turn environment variables into password-protected files and run any command with them injected. Plaintext never touches disk, git or backups. Command: `envp`.",
   "license": "MIT",
   "author": "wusende",
