@@ -89,6 +89,11 @@ enum Commands {
         /// Merge into an existing profile (same-name keys take the new value)
         #[arg(long)]
         merge: bool,
+        /// Expand $NAME / ${NAME} in bare and double-quoted values (earlier
+        /// keys of the file first, then the environment); unset names are
+        /// errors. Off by default: values are stored literally
+        #[arg(long)]
+        expand: bool,
     },
     /// Show profile variables (values masked by default)
     Show {
@@ -275,8 +280,11 @@ fn dispatch(password_stdin: bool, password_file: Option<PathBuf>, command: Comma
             only,
             except,
             merge,
-        } => commands::import_command(&name, from, from_env, only, except, merge, &mut input)
-            .map(|_| 0),
+            expand,
+        } => commands::import_command(
+            &name, from, from_env, only, except, merge, expand, &mut input,
+        )
+        .map(|_| 0),
         Commands::Show { name, reveal } => commands::show(&name, reveal, &mut input).map(|_| 0),
         Commands::Export { name, output } => commands::export(&name, output, &mut input).map(|_| 0),
         Commands::Edit { name } => commands::edit(&name, &mut input).map(|_| 0),

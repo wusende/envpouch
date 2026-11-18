@@ -3,11 +3,19 @@
 //! The encrypted payload is a JSON serialization of `BTreeMap<String, String>`
 //! (stable key order, correctly handles values containing newlines, quotes,
 //! and Unicode). Export serializes it back into standard .env text.
+//!
+//! Values are **literal**: `$NAME` / `${NAME}` are never substituted, in any
+//! quoting style. dotenvy (which expands them against the process environment)
+//! is deliberately not used: a secrets file must round-trip byte-exactly, and
+//! expansion silently rewrites `$`-laden values — a bcrypt hash
+//! (`$2b$12$…`) or a token with `$` would be truncated when the referenced
+//! name is unset. Shell-style escapes (`\n`, `\"`, `\\`, `\$`, `\ `) and
+//! single/double quoting are still understood.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -47,21 +55,31 @@ impl EnvVars {
         self.0.remove(key).is_some()
     }
 
-    /// Parse a .env file with dotenvy (supports comments, `export` prefix,
-    /// quotes, multi-line values).
-    /// Note: `$VAR` references in values are expanded by dotenvy (consistent
-    /// with the dotenv ecosystem). Single-quoted values are NOT expanded.
+    /// Parse a .env file: comments, `export` prefix, single/double quotes,
+    /// escapes, multi-line quoted values, UTF-8 BOM and CRLF. Values are
+    /// literal — no `$` substitution (see the module docs).
     pub fn parse_file(path: &Path) -> Result<Self> {
-        let iter = dotenvy::from_path_iter(path)
+        Self::parse_file_mode(path, false).map(|(vars, _)| vars)
+    }
+
+    /// `parse_file` with opt-in expansion (`import --expand`): `$NAME` and
+    /// `${NAME}` in bare and double-quoted values are resolved against earlier
+    /// keys of the same file, then the process environment. Single-quoted
+    /// values, escaped `\$` and `$` not followed by a name stay literal.
+    /// Returns the keys whose values were expanded so the caller can name them
+    /// (values are never reported).
+    pub fn parse_file_expanded(path: &Path) -> Result<(Self, Vec<String>)> {
+        Self::parse_file_mode(path, true)
+    }
+
+    fn parse_file_mode(path: &Path, expand: bool) -> Result<(Self, Vec<String>)> {
+        let raw = std::fs::read(path)
             .with_context(|| format!("cannot read .env file: {}", path.display()))?;
-        let mut map = BTreeMap::new();
-        for item in iter {
-            let (k, v) = item.map_err(|e| {
-                anyhow::anyhow!("failed to parse .env file ({}): {e}", path.display())
-            })?;
-            map.insert(k, v);
-        }
-        Ok(Self(map))
+        let text = std::str::from_utf8(&raw).map_err(|_| {
+            anyhow::anyhow!("cannot read .env file: {}: not valid UTF-8", path.display())
+        })?;
+        parse_text(text, expand)
+            .with_context(|| format!("failed to parse .env file ({})", path.display()))
     }
 
     /// Merge `other` into `self`: same-name keys take the value from `other`,
@@ -105,6 +123,350 @@ impl EnvVars {
     }
 }
 
+/// Parse .env text into variables. Errors never echo values: a parse failure
+/// in a secrets file must not print the secret it choked on.
+///
+/// With `expand`, `$NAME` / `${NAME}` in bare and double-quoted values are
+/// resolved (earlier keys in the same file first, then the process
+/// environment); single-quoted values stay literal. Returns the keys whose
+/// values were expanded, in file order.
+fn parse_text(text: &str, expand: bool) -> Result<(EnvVars, Vec<String>)> {
+    // A Windows-edited file carries a BOM; it must not leak into a key.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut map = BTreeMap::new();
+    let mut expanded_keys = Vec::new();
+    for (line_no, line) in logical_lines(text)? {
+        let mut expanded = false;
+        if let Some((key, value)) = parse_line(line_no, &line, &map, expand, &mut expanded)? {
+            if expanded {
+                expanded_keys.push(key.clone());
+            }
+            map.insert(key, value);
+        }
+    }
+    Ok((EnvVars(map), expanded_keys))
+}
+
+/// Quote state while scanning for physical line boundaries.
+#[derive(Clone, Copy, PartialEq)]
+enum Scan {
+    Bare,
+    BareEscape,
+    Single,
+    Double,
+    DoubleEscape,
+}
+
+/// Finish a logical line, dropping the `\r` of a CRLF terminator. A raw CR
+/// inside an open quote is data and never reaches this function.
+fn push_line(out: &mut Vec<(usize, String)>, cur: &mut String, start_line: usize) {
+    if cur.ends_with('\r') {
+        cur.pop();
+    }
+    out.push((start_line, std::mem::take(cur)));
+}
+
+/// Split into logical lines: a value may span physical lines while a single
+/// or double quote is open (certificates, private keys). A comment starts at
+/// `#` only where it follows whitespace, and ends that physical line. Returns
+/// (1-based start line, text) so later errors can name a line without echoing
+/// it.
+fn logical_lines(text: &str) -> Result<Vec<(usize, String)>> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut line_no = 1usize;
+    let mut start_line = 1usize;
+    let mut state = Scan::Bare;
+    let mut prev_ws = false;
+    let mut comment = false;
+
+    for ch in text.chars() {
+        if comment {
+            if ch == '\n' {
+                push_line(&mut out, &mut cur, start_line);
+                line_no += 1;
+                start_line = line_no;
+                prev_ws = false;
+                comment = false;
+            }
+            continue;
+        }
+        match state {
+            Scan::Bare => match ch {
+                '\\' => {
+                    cur.push(ch);
+                    state = Scan::BareEscape;
+                }
+                '\'' => {
+                    cur.push(ch);
+                    state = Scan::Single;
+                }
+                '"' => {
+                    cur.push(ch);
+                    state = Scan::Double;
+                }
+                '#' if prev_ws => comment = true,
+                '\n' => {
+                    push_line(&mut out, &mut cur, start_line);
+                    line_no += 1;
+                    start_line = line_no;
+                    prev_ws = false;
+                }
+                c => {
+                    cur.push(c);
+                    prev_ws = c.is_whitespace();
+                }
+            },
+            Scan::BareEscape => {
+                cur.push(ch);
+                state = Scan::Bare;
+            }
+            Scan::Single => {
+                cur.push(ch);
+                if ch == '\'' {
+                    state = Scan::Bare;
+                }
+            }
+            Scan::Double => match ch {
+                '\\' => {
+                    cur.push(ch);
+                    state = Scan::DoubleEscape;
+                }
+                '"' => {
+                    cur.push(ch);
+                    state = Scan::Bare;
+                }
+                c => cur.push(c),
+            },
+            Scan::DoubleEscape => {
+                cur.push(ch);
+                state = Scan::Double;
+            }
+        }
+    }
+    if state != Scan::Bare {
+        bail!("line {start_line}: unterminated quote or escape");
+    }
+    if !cur.is_empty() {
+        out.push((start_line, cur));
+    }
+    Ok(out)
+}
+
+/// Parse one logical line. `None` for blank and comment-only lines.
+fn parse_line(
+    line_no: usize,
+    line: &str,
+    seen: &BTreeMap<String, String>,
+    expand: bool,
+    expanded: &mut bool,
+) -> Result<Option<(String, String)>> {
+    let mut rest = line.trim_start();
+    if rest.is_empty() || rest.starts_with('#') {
+        return Ok(None);
+    }
+
+    let (mut key, after_key) = split_key(line_no, rest)?;
+    rest = after_key.trim_start();
+    if key == "export" {
+        rest = match rest.strip_prefix('=') {
+            // `export` used as a variable name itself
+            Some(after_eq) => after_eq,
+            None => {
+                let (inner, after_inner) = split_key(line_no, rest)?;
+                key = inner;
+                after_inner.trim_start()
+            }
+        };
+    }
+    let rest = rest
+        .strip_prefix('=')
+        .ok_or_else(|| anyhow::anyhow!("line {line_no}: missing '=' after the variable name"))?;
+
+    Ok(Some((
+        key,
+        parse_value(line_no, rest.trim_start(), seen, expand, expanded)?,
+    )))
+}
+
+/// Read the variable name at the start of `s` (dotenv makes `.` part of the
+/// name; `validate_key` rejects it later with a clearer message).
+fn split_key(line_no: usize, s: &str) -> Result<(String, &str)> {
+    match s.chars().next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => bail!("line {line_no}: variable name must start with a letter or '_'"),
+    }
+    let end = s
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+        .unwrap_or(s.len());
+    Ok((s[..end].to_string(), &s[end..]))
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ValueState {
+    Bare,
+    Escape,
+    Single,
+    Double,
+    DoubleEscape,
+    End,
+}
+
+/// Parse a value: single quotes are fully literal, double quotes and bare
+/// values decode `\n \" \\ \$ \' \ ` only, and a bare value ends at unquoted
+/// whitespace. `$` is literal unless `expand` is set; even then it is never
+/// special inside single quotes or after a backslash.
+fn parse_value(
+    line_no: usize,
+    s: &str,
+    seen: &BTreeMap<String, String>,
+    expand: bool,
+    expanded: &mut bool,
+) -> Result<String> {
+    let mut out = String::with_capacity(s.len());
+    let mut state = ValueState::Bare;
+    let mut it = s.chars().peekable();
+    while let Some(ch) = it.next() {
+        match state {
+            ValueState::Bare => match ch {
+                '\'' => state = ValueState::Single,
+                '"' => state = ValueState::Double,
+                '\\' => state = ValueState::Escape,
+                '$' if expand => {
+                    if expand_reference(line_no, &mut it, seen, &mut out)? {
+                        *expanded = true;
+                    }
+                }
+                c if c.is_whitespace() => state = ValueState::End,
+                c => out.push(c),
+            },
+            ValueState::Escape => {
+                push_escape(line_no, ch, &mut out)?;
+                state = ValueState::Bare;
+            }
+            ValueState::Single => {
+                if ch == '\'' {
+                    state = ValueState::Bare;
+                } else {
+                    out.push(ch);
+                }
+            }
+            ValueState::Double => match ch {
+                '"' => state = ValueState::Bare,
+                '\\' => state = ValueState::DoubleEscape,
+                '$' if expand => {
+                    if expand_reference(line_no, &mut it, seen, &mut out)? {
+                        *expanded = true;
+                    }
+                }
+                c => out.push(c),
+            },
+            ValueState::DoubleEscape => {
+                push_escape(line_no, ch, &mut out)?;
+                state = ValueState::Double;
+            }
+            ValueState::End => {
+                if !ch.is_whitespace() {
+                    bail!(
+                        "line {line_no}: unexpected text after the value \
+                         (quote values that contain spaces)"
+                    );
+                }
+            }
+        }
+    }
+    match state {
+        ValueState::Bare | ValueState::End => Ok(out),
+        // logical_lines rejects these first; the guard keeps direct callers safe
+        _ => bail!("line {line_no}: unterminated quote or escape"),
+    }
+}
+
+/// Resolve one reference, positioned right after a `$`. Returns `false` (and
+/// writes a literal `$`, plus any name-shaped characters it consumed) when the
+/// next character cannot start a name — so `$2b$12$…` survives `--expand`
+/// unescaped. An unset name is an error: substituting `""` is exactly the
+/// silent truncation this mode must not reintroduce. Resolution is one pass;
+/// an expanded value is not re-scanned.
+fn expand_reference(
+    line_no: usize,
+    it: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    seen: &BTreeMap<String, String>,
+    out: &mut String,
+) -> Result<bool> {
+    let name = if it.peek() == Some(&'{') {
+        it.next();
+        let mut name = String::new();
+        loop {
+            match it.next() {
+                Some('}') => break,
+                Some(c) => name.push(c),
+                None => bail!("line {line_no}: unterminated ${{...}} reference"),
+            }
+        }
+        if !is_identifier(&name) {
+            bail!(
+                "line {line_no}: ${{...}} must contain a variable name \
+                 ([A-Za-z_][A-Za-z0-9_]*); defaults and nested forms are not supported"
+            );
+        }
+        name
+    } else {
+        let mut name = String::new();
+        while let Some(&c) = it.peek() {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                name.push(c);
+                it.next();
+            } else {
+                break;
+            }
+        }
+        if !is_identifier(&name) {
+            out.push('$');
+            out.push_str(&name);
+            return Ok(false);
+        }
+        name
+    };
+
+    // Earlier keys of the same file win over the ambient environment.
+    match seen
+        .get(&name)
+        .cloned()
+        .or_else(|| std::env::var(&name).ok())
+    {
+        Some(value) => {
+            out.push_str(&value);
+            Ok(true)
+        }
+        None => bail!(
+            "line {line_no}: {name} is not set; --expand resolves earlier keys in the file \
+             and the environment"
+        ),
+    }
+}
+
+/// POSIX identifier, the same shape `validate_key` enforces.
+fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn push_escape(line_no: usize, ch: char, out: &mut String) -> Result<()> {
+    match ch {
+        '\\' | '\'' | '"' | '$' | ' ' => out.push(ch),
+        'n' => out.push('\n'),
+        _ => bail!(
+            "line {line_no}: invalid escape sequence (supported: \\\\ \\' \\\" \\$ \\<space> \\n)"
+        ),
+    }
+    Ok(())
+}
+
 /// Reject keys that are unsafe to pass to child processes (spec §4.4 plus a
 /// strict superset for production safety): the name must be a POSIX portable
 /// identifier `[A-Za-z_][A-Za-z0-9_]*`. This subsumes the spec's explicit
@@ -139,7 +501,7 @@ fn format_value(v: &str) -> String {
         return String::new();
     }
     // No quotes needed for values made purely of safe characters
-    // (excludes space, #, $, quotes, and other chars dotenvy treats specially)
+    // (excludes space, #, $, quotes, and other chars the parser treats specially)
     let is_safe = v.bytes().all(|b| {
         matches!(
             b,
@@ -150,11 +512,8 @@ fn format_value(v: &str) -> String {
     if is_safe {
         return v.to_string();
     }
-    // Single-quote path (values are literal inside it) — but NOT when the
-    // value ends with a backslash: dotenvy treats a `\'` sequence as an
-    // escaped quote, so `'a\'` (trailing backslash before the closer) is a
-    // hard parse error (fuzz discovery). Double quotes handle it via `\\`.
-    if !v.contains('\'') && !v.ends_with('\\') {
+    // Single quotes are fully literal, including backslashes and `$`
+    if !v.contains('\'') {
         return format!("'{v}'");
     }
     let mut s = String::with_capacity(v.len() + 2);
@@ -163,11 +522,9 @@ fn format_value(v: &str) -> String {
         match c {
             '\\' => s.push_str("\\\\"),
             '"' => s.push_str("\\\""),
-            '$' => s.push_str("\\$"),
             '\n' => s.push_str("\\n"),
-            // dotenvy REJECTS the \r and \t escape sequences (hard parse
-            // error, probed empirically) but preserves raw CR/TAB/DEL and
-            // newlines inside double quotes verbatim — emit them raw.
+            // The parser REJECTS the \r and \t escape sequences but keeps raw
+            // CR/TAB/DEL inside double quotes verbatim — emit them raw.
             _ => s.push(c),
         }
     }
@@ -278,20 +635,114 @@ mod tests {
         assert!(validate_key("FOO\r", "x").is_err());
     }
 
-    /// Windows-edited files use CRLF line endings; values must not keep `\r`.
-    /// Documents dotenvy's double-quote escape semantics (probed empirically,
-    /// dotenvy 0.15): `\n`, `\$`, `\"`, `\\` are decoded; `\r` and `\t` are
-    /// REJECTED with a hard parse error; raw CR/TAB/DEL inside the quotes are
-    /// preserved verbatim. `format_value` relies on exactly this behavior.
+    /// `$` is never substituted — bare, double-quoted, braced or repeated.
+    /// Regression: import used to expand these against the process
+    /// environment, silently truncating hashes and tokens.
     #[test]
-    fn probe_dotenvy_double_quote_escapes() {
+    fn dollar_is_literal() {
+        let path = write_temp_env(concat!(
+            "BARE=pa$$w0rd$HOME\n",
+            "BRACES=${HOME}/bin\n",
+            "DQUOTED=\"a $HOME b\"\n",
+            "SQUOTED='a $HOME b'\n",
+            "HASH=$2b$12$abcdefghijklmnop\n",
+        ));
+        let vars = EnvVars::parse_file(&path).unwrap();
+        let get = |k: &str| vars.get(k).unwrap().to_string();
+        assert_eq!(get("BARE"), "pa$$w0rd$HOME");
+        assert_eq!(get("BRACES"), "${HOME}/bin");
+        assert_eq!(get("DQUOTED"), "a $HOME b");
+        assert_eq!(get("SQUOTED"), "a $HOME b");
+        assert_eq!(get("HASH"), "$2b$12$abcdefghijklmnop");
+    }
+
+    /// Expansion is opt-in, one pass, and scoped to bare/double-quoted
+    /// values: earlier file keys win over the environment, single quotes and
+    /// escaped `$` stay literal, and `$` before non-name characters does too.
+    #[test]
+    fn expand_is_opt_in_and_file_scoped() {
+        let path = write_temp_env(concat!(
+            "BASE=1\n",
+            "HOME=filehome\n",
+            "DERIVED=$BASE:x\n",
+            "BRACED=\"${BASE}:y\"\n",
+            "DOUBLE=\"$HOME/bin\"\n",
+            "FILEWINS=$HOME\n",
+            "SQUOTED='$BASE'\n",
+            "ESCAPED=\"\\$BASE\"\n",
+            "DIGITS=$2b$12$\n",
+            "ENDDOLLAR=tail$\n",
+        ));
+        // literal mode: nothing moves, not even the file's own HOME
+        let plain = EnvVars::parse_file(&path).unwrap();
+        assert_eq!(plain.get("DERIVED"), Some("$BASE:x"));
+        assert_eq!(plain.get("FILEWINS"), Some("$HOME"));
+
+        let (vars, expanded) = EnvVars::parse_file_expanded(&path).unwrap();
+        assert_eq!(vars.get("DERIVED"), Some("1:x"));
+        assert_eq!(vars.get("BRACED"), Some("1:y"));
+        assert_eq!(vars.get("DOUBLE"), Some("filehome/bin"));
+        assert_eq!(vars.get("FILEWINS"), Some("filehome"));
+        assert_eq!(vars.get("SQUOTED"), Some("$BASE"));
+        assert_eq!(vars.get("ESCAPED"), Some("$BASE"));
+        assert_eq!(vars.get("DIGITS"), Some("$2b$12$"));
+        assert_eq!(vars.get("ENDDOLLAR"), Some("tail$"));
+        assert_eq!(expanded, vec!["DERIVED", "BRACED", "DOUBLE", "FILEWINS"]);
+    }
+
+    /// With no earlier key of that name, expansion falls back to the process
+    /// environment.
+    #[test]
+    fn expand_falls_back_to_the_environment() {
+        let Ok(home) = std::env::var("HOME") else {
+            return; // environment without HOME: nothing to assert
+        };
+        let path = write_temp_env("ENVREF=$HOME\nBRACED=\"${HOME}\"\n");
+        let (vars, expanded) = EnvVars::parse_file_expanded(&path).unwrap();
+        assert_eq!(vars.get("ENVREF"), Some(home.as_str()));
+        assert_eq!(vars.get("BRACED"), Some(home.as_str()));
+        assert_eq!(expanded, vec!["ENVREF", "BRACED"]);
+    }
+
+    /// An unset name is a hard error (never `""`), unsupported `${...}` forms
+    /// are rejected, and neither message echoes the surrounding value.
+    #[test]
+    fn expand_rejects_unset_and_malformed_references() {
+        let unset = write_temp_env("K=$ENVPOUCH_UNSET_TEST_9f3a\n");
+        let err = format!("{:#}", EnvVars::parse_file_expanded(&unset).unwrap_err());
+        assert!(err.contains("ENVPOUCH_UNSET_TEST_9f3a is not set"), "{err}");
+
+        let unterminated = write_temp_env("K=${HOME\n");
+        let err = format!(
+            "{:#}",
+            EnvVars::parse_file_expanded(&unterminated).unwrap_err()
+        );
+        assert!(err.contains("unterminated ${...}"), "{err}");
+
+        let defaulted = write_temp_env("K=${HOME:-/tmp}\n");
+        let err = format!(
+            "{:#}",
+            EnvVars::parse_file_expanded(&defaulted).unwrap_err()
+        );
+        assert!(err.contains("defaults and nested forms"), "{err}");
+
+        let embedded = write_temp_env("K=\"secret-$NOPE_9f3a\"\n");
+        let err = format!("{:#}", EnvVars::parse_file_expanded(&embedded).unwrap_err());
+        assert!(
+            !err.contains("secret-"),
+            "error must not leak the value: {err}"
+        );
+    }
+
+    /// Double quotes and bare values decode `\n`, `\$`, `\"`, `\\`; `\r` and
+    /// `\t` are hard parse errors; raw CR/TAB/DEL are preserved verbatim.
+    /// `format_value` relies on exactly this behavior.
+    #[test]
+    fn double_quote_escapes() {
         let parse_value = |input: &str| -> Result<Option<String>, String> {
             let path = write_temp_env(&format!("K=\"{input}\"\n"));
             match EnvVars::parse_file(&path) {
-                Ok(v) => Ok(v
-                    .iter()
-                    .find(|(k, _)| k.as_str() == "K")
-                    .map(|(_, v)| v.clone())),
+                Ok(v) => Ok(v.get("K").map(str::to_string)),
                 Err(e) => Err(e.to_string()),
             }
         };
@@ -309,45 +760,63 @@ mod tests {
         assert_eq!(parse_value("a\u{7f}b").unwrap(), Some("a\u{7f}b".into()));
     }
 
-    /// Raw CR/TAB/newline inside single quotes are preserved literally.
+    /// Single quotes are fully literal: backslashes (including one right
+    /// before the closing quote), `$`, and raw control characters survive.
     #[test]
-    fn probe_dotenvy_single_quote_raw() {
-        for (input, want) in [("a\rb", "a\rb"), ("a\tb", "a\tb"), ("a\nb", "a\nb")] {
-            let path = write_temp_env(&format!("K='{input}'\n"));
-            let vars = EnvVars::parse_file(&path).unwrap();
-            let got = vars
-                .iter()
-                .find(|(k, _)| k.as_str() == "K")
-                .map(|(_, v)| v.clone());
-            assert_eq!(got.as_deref(), Some(want), "single-quote raw {input:?}");
-        }
-    }
-
-    /// Documents dotenvy's single-quote semantics (probed empirically,
-    /// dotenvy 0.15): contents are literal EXCEPT `\'` which escapes the
-    /// closing quote (so a trailing backslash before the closer is a hard
-    /// parse error); `\\`, `\$`, `\b` stay literal backslashes.
-    #[test]
-    fn probe_dotenvy_single_quote_backslash() {
+    fn single_quote_is_literal() {
         let parse_value = |input: &str| -> Result<Option<String>, String> {
             let path = write_temp_env(&format!("K='{input}'\n"));
             match EnvVars::parse_file(&path) {
-                Ok(v) => Ok(v
-                    .iter()
-                    .find(|(k, _)| k.as_str() == "K")
-                    .map(|(_, v)| v.clone())),
+                Ok(v) => Ok(v.get("K").map(str::to_string)),
                 Err(e) => Err(e.to_string()),
             }
         };
-        assert!(
-            parse_value("a\\").is_err(),
-            "trailing backslash before closer errors"
-        );
-        assert!(parse_value("a\\'b").is_err(), "\\' escapes the closer");
-        // literal backslashes elsewhere
+        assert_eq!(parse_value("a\\").unwrap(), Some("a\\".into()));
         assert_eq!(parse_value("a\\\\").unwrap(), Some("a\\\\".into()));
         assert_eq!(parse_value("a\\b").unwrap(), Some("a\\b".into()));
         assert_eq!(parse_value("a\\$b").unwrap(), Some("a\\$b".into()));
+        for (input, want) in [("a\rb", "a\rb"), ("a\tb", "a\tb"), ("a\nb", "a\nb")] {
+            assert_eq!(
+                parse_value(input).unwrap(),
+                Some(want.into()),
+                "single-quote raw {input:?}"
+            );
+        }
+    }
+
+    /// A quoted value may span physical lines (certificates, private keys);
+    /// the newline is part of the value and the next line is a new entry.
+    #[test]
+    fn quoted_value_spans_lines() {
+        let path = write_temp_env("KEY=\"line1\nline2\"\nAFTER=ok\n");
+        let vars = EnvVars::parse_file(&path).unwrap();
+        assert_eq!(vars.get("KEY"), Some("line1\nline2"));
+        assert_eq!(vars.get("AFTER"), Some("ok"));
+        assert_eq!(vars.len(), 2);
+    }
+
+    /// `#` starts a comment only after whitespace; trailing text after a
+    /// closed value is a hard error. Parse errors name the line but never
+    /// echo the value (secrets hygiene).
+    #[test]
+    fn comments_trailing_text_and_error_hygiene() {
+        let path = write_temp_env("A=1 # comment\nB=v#not-comment\nC=\"x # y\" # c\n");
+        let vars = EnvVars::parse_file(&path).unwrap();
+        assert_eq!(vars.get("A"), Some("1"));
+        assert_eq!(vars.get("B"), Some("v#not-comment"));
+        assert_eq!(vars.get("C"), Some("x # y"));
+        assert_eq!(vars.len(), 3);
+
+        let bad = write_temp_env("D=\"a\" b\n");
+        assert!(EnvVars::parse_file(&bad).is_err());
+
+        let leaky = write_temp_env("K=\"hunter2\\q\"\n");
+        let err = format!("{:#}", EnvVars::parse_file(&leaky).unwrap_err());
+        assert!(
+            !err.contains("hunter2"),
+            "error must not leak the value: {err}"
+        );
+        assert!(err.contains("line 1"), "error should name the line: {err}");
     }
 
     #[test]
@@ -365,7 +834,7 @@ mod tests {
     }
 
     /// Exported text must re-import to exactly the same key/value pairs
-    /// (critical: dotenvy's handling of single quotes, double quotes, escapes).
+    /// (critical: quoting, escapes, `$`-laden values).
     #[test]
     fn env_text_roundtrip_tricky_values() {
         let cases: Vec<(String, String)> = vec![

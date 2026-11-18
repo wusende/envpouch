@@ -16,7 +16,7 @@ exclusive).
 
 | Command | What it does |
 |---|---|
-| `import <name> --from <file> [--merge]` | Create a profile from a `.env` file; `--merge` folds into an existing one |
+| `import <name> --from <file> [--merge] [--expand]` | Create a profile from a `.env` file; `--merge` folds into an existing one; `--expand` resolves `$NAME` / `${NAME}` in bare and double-quoted values (earlier keys of the file first, then the environment; unset names are errors) |
 | `import <name> --from-env [--only A,B \| --except A,B]` | Import from the current environment; a default list (`PATH`, `HOME`, `SSH_*`, …) is excluded — `--only` bypasses it, `--except` adds to it |
 | `show <name> [--reveal]` | Print variables, masked by default |
 | `export <name> [-o <file>]` | Print `.env` text to stdout, or write it to a file |
@@ -145,6 +145,15 @@ envp complete --shell fish  > ~/.config/fish/completions/envp.fish
 
 ## Limitations
 
+- `.env` values are imported literally: no `$VAR` / `${VAR}` substitution in
+  bare, single- or double-quoted values (a bcrypt hash like `$2b$12$…` or any
+  token containing `$` is stored unchanged). Comments, `export`, quotes, the
+  escapes `\n \" \\ \$ \' \ `, multi-line quoted values, UTF-8 BOM and CRLF
+  are still understood. `import --expand` opts in to substitution — bare and
+  double-quoted values only, earlier file keys before the environment, unset
+  names are errors, and the expanded key names (never values) are reported.
+  Under `--expand`, a `$` that must stay literal (bcrypt hashes, tokens) needs
+  single quotes or `\$`, otherwise the name after it is treated as a reference.
 - The stored profile is canonical (alphabetical keys): comments and
   formatting from the source `.env` are dropped at import; `export` and
   `edit` show and rewrite that canonical form.

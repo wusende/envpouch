@@ -13,7 +13,7 @@
 
 | 命令 | 作用 |
 |---|---|
-| `import <name> --from <file> [--merge]` | 从 `.env` 文件创建 profile；`--merge` 合并进已有 profile |
+| `import <name> --from <file> [--merge] [--expand]` | 从 `.env` 文件创建 profile；`--merge` 合并进已有 profile；`--expand` 展开裸值和双引号值里的 `$NAME` / `${NAME}`（文件内先定义的键优先，其次环境；未定义的名字报错） |
 | `import <name> --from-env [--only A,B \| --except A,B]` | 从当前环境导入；默认排除列表（`PATH`、`HOME`、`SSH_*` 等）会被排除——`--only` 绕过它，`--except` 追加 |
 | `show <name> [--reveal]` | 打印变量，默认打码 |
 | `export <name> [-o <file>]` | 把 `.env` 文本打印到 stdout，或写入文件 |
@@ -120,6 +120,13 @@ envp complete --shell fish  > ~/.config/fish/completions/envp.fish
 
 ## 限制
 
+- `.env` 的值按字面导入：裸值、单引号、双引号里都不做 `$VAR` / `${VAR}`
+  展开（bcrypt 哈希 `$2b$12$…` 或任何含 `$` 的 token 原样保存）。注释、
+  `export`、引号、`\n \" \\ \$ \' \ ` 转义、跨行引号值、UTF-8 BOM 与 CRLF
+  仍然支持。要展开就用 `import --expand`：只作用于裸值和双引号值，先查文件内
+  已定义的键、再查环境，未定义的名字直接报错；成功时只列出发生了展开的键名，
+  不打印值。`--expand` 下本来就要保留的 `$`（bcrypt 哈希、token）必须用单引号
+  或 `\$` 转义，否则后面的名字会被当作引用。
 - profile 以规范形式存储（键按字母排序）：import 时就丢掉源 `.env` 的注释和
   格式；export 与 edit 展示和重写的都是这份规范形式。
 - 编辑器打开期间，`edit` 会保留一个明文临时文件（权限 0600，位于

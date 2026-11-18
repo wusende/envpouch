@@ -255,26 +255,45 @@ pub fn import_command(
     only: Option<String>,
     except: Option<String>,
     merge: bool,
+    expand: bool,
     input: &mut PasswordInput,
 ) -> Result<()> {
     if only.is_some() && except.is_some() {
         bail!("--only and --except are mutually exclusive");
     }
+    if expand && from.is_none() {
+        bail!("--expand only applies to --from <file>: --from-env values are already expanded");
+    }
     match (from, from_env) {
-        (Some(f), false) => import_from_file(name, &f, merge, input),
+        (Some(f), false) => import_from_file(name, &f, merge, expand, input),
         (None, true) => import_from_env(name, only, except, merge, input),
         (Some(_), true) => bail!("--from and --from-env are mutually exclusive"),
         (None, false) => bail!("nothing to import: specify --from <file> or --from-env"),
     }
 }
 
-fn import_from_file(name: &str, from: &Path, merge: bool, input: &mut PasswordInput) -> Result<()> {
+fn import_from_file(
+    name: &str,
+    from: &Path,
+    merge: bool,
+    expand: bool,
+    input: &mut PasswordInput,
+) -> Result<()> {
     if !from.exists() {
         bail!("file not found: {}", from.display());
     }
-    let new_vars = EnvVars::parse_file(from)?;
+    let (new_vars, expanded) = if expand {
+        EnvVars::parse_file_expanded(from)?
+    } else {
+        (EnvVars::parse_file(from)?, Vec::new())
+    };
     require_valid_keys(&new_vars)?;
-    import_vars(name, new_vars, merge, "", input)
+    import_vars(name, new_vars, merge, "", input)?;
+    if !expanded.is_empty() {
+        // Names only: the expanded values are the secrets.
+        eprintln!("note: expanded $ references in: {}", expanded.join(", "));
+    }
+    Ok(())
 }
 
 /// `import --from-env`: grab variables from the current process environment.
@@ -578,13 +597,6 @@ fn import_vars(
         let _ = writeln!(out, "{k}");
     }
     write_stdout(out.as_bytes())?;
-
-    // Spec §5.1 pitfall: dotenvy expands $VAR in double-quoted/bare values
-    if vars.iter().any(|(_, v)| v.contains('$')) {
-        eprintln!(
-            "note: values containing $ are expanded under dotenvy semantics; use single quotes in .env files"
-        );
-    }
     Ok(())
 }
 
@@ -1374,10 +1386,33 @@ mod tests {
             Some("A".into()),
             Some("B".into()),
             false,
+            false,
             &mut input,
         )
         .expect_err("both flags must be rejected");
         assert!(err.to_string().contains("mutually exclusive"), "{err}");
+    }
+
+    /// `--expand` only makes sense for `--from`: environment values are
+    /// already expanded, so the flag is rejected before any IO.
+    #[test]
+    fn expand_requires_a_from_file() {
+        let mut input = PasswordInput::from_flags(false, None).unwrap();
+        let err = import_command(
+            "test-profile",
+            None,
+            true,
+            None,
+            None,
+            false,
+            true,
+            &mut input,
+        )
+        .expect_err("--expand with --from-env must be rejected");
+        assert!(
+            err.to_string().contains("--expand only applies to --from"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1440,23 +1475,21 @@ mod tests {
         assert!(!msg.contains("x\""), "error never contains values: {msg}");
     }
 
-    /// A UTF-8 BOM prefix (typical of Windows-edited .env files) must never
-    /// reach encrypted storage: either dotenvy strips it, or import-time
-    /// validation rejects it with an actionable error.
+    /// A UTF-8 BOM prefix (typical of Windows-edited .env files) is stripped
+    /// by the parser: it must never become part of the key, and the file must
+    /// import cleanly.
     #[test]
     fn bom_file_never_reaches_storage() {
-        let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bom.env");
         std::fs::write(&path, "\u{feff}FOO=bar\n").unwrap();
-        match EnvVars::parse_file(&path) {
-            Ok(vars) => {
-                assert!(
-                    require_valid_keys(&vars).is_err(),
-                    "BOM-prefixed key must be rejected by import validation"
-                );
-            }
-            Err(_) => { /* dotenvy rejected the file outright — also fine */ }
-        }
+        let vars = EnvVars::parse_file(&path).unwrap();
+        assert!(
+            require_valid_keys(&vars).is_ok(),
+            "BOM must be stripped before key validation"
+        );
+        assert_eq!(vars.get("FOO"), Some("bar"));
+        assert_eq!(vars.len(), 1);
     }
 
     #[test]

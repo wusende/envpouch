@@ -3,7 +3,7 @@
 //! Feeds generated garbage — random bytes, truncations, bit flips, random
 //! Unicode — into every pure input surface and asserts the only acceptable
 //! outcomes: `Ok` or a clean `Err`. **Any panic (unwrap, index OOB, integer
-//! overflow in debug, dotenvy internals) fails the suite.**
+//! overflow in debug, parser internals) fails the suite.**
 //!
 //! Reproducible: a fixed-seed xorshift PRNG, so a failure can be replayed.
 //!
@@ -233,6 +233,38 @@ fn fuzz_parse_file_never_panics() {
         assert!(
             r.is_ok(),
             "parse_file panicked on truncation {cut}: {}",
+            r.unwrap_err()
+        );
+    }
+}
+
+/// `parse_file_expanded` is a separate code path (`--expand`); garbage and
+/// truncated references must still fail cleanly, never panic.
+#[test]
+fn fuzz_parse_file_expanded_never_panics() {
+    let mut rng = XorShift::new(0xAB12_CD34);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fuzz-expand.env");
+
+    for i in 0..400 {
+        let content = rand_bytes(&mut rng, 256);
+        std::fs::write(&path, &content).unwrap();
+        let r = no_panic(|| EnvVars::parse_file_expanded(&path));
+        assert!(
+            r.is_ok(),
+            "parse_file_expanded panicked on iteration {i}: {}",
+            r.unwrap_err()
+        );
+    }
+
+    // truncations of a reference-heavy file
+    let valid = b"A=1\nB=$A/${A}\nC='$A'\nD=\"\\$A\"\nE=$2b$12$\n";
+    for cut in 0..valid.len() {
+        std::fs::write(&path, &valid[..cut]).unwrap();
+        let r = no_panic(|| EnvVars::parse_file_expanded(&path));
+        assert!(
+            r.is_ok(),
+            "parse_file_expanded panicked on truncation {cut}: {}",
             r.unwrap_err()
         );
     }
