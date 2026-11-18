@@ -40,7 +40,7 @@ if [ -z "${name:-}" ] || [ -z "${version:-}" ]; then
   exit 1
 fi
 
-# On a tag build the tag is the release's name: v0.3.0 must publish 0.3.0.
+# On a tag build the tag is the release's name: v0.4.0 must publish 0.4.0.
 # A mismatch would spend the crate version under a misleading git tag, and a
 # published version can never be reused or removed.
 if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ -n "${GITHUB_REF_NAME:-}" ]; then
